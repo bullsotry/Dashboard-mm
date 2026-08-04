@@ -46,12 +46,21 @@ ssh "$VPS" 'mkdir -p /root/dashboard-mm'
 
 tar czf - \
   server.py config.py requirements.txt \
-  adapters/__init__.py adapters/base.py \
+  adapters/__init__.py adapters/base.py adapters/stats.py \
   adapters/bitunix_files.py adapters/bitunix_account.py adapters/bitunix_klines.py \
   static/index.html static/app.js static/fill_markers.js \
   static/vendor/lightweight-charts.standalone.production.js \
+  tests/test_stats.py \
   deploy/dashboard-mm.service \
 | ssh "$VPS" 'tar xzf - -C /root/dashboard-mm'
+```
+
+The host must be the one the bot runs on: this dashboard reads the bot's
+state files from the local filesystem, so deploying it anywhere else yields
+an empty screen. Confirm before copying:
+
+```bash
+ssh "$VPS" 'ls -l /root/bots/v17mm/bitunix_mm/.v15mm_hl_viz.json /root/.v17mm_tracker/fills.jsonl'
 ```
 
 ## Step 2 — venv + dependencies
@@ -86,9 +95,10 @@ EOF
 chmod 600 /root/dashboard-mm/.env
 ```
 
-The key must have trade/withdraw unchecked. If you skip this step entirely the
-dashboard still runs — the margin panel just shows "account margin
-unavailable" and everything else works.
+The key must have trade/withdraw unchecked. This step is genuinely optional:
+the unit declares the env file with a leading `-`, so a missing `.env` is not
+a startup failure. Skip it and the dashboard runs with the margin panel
+showing "account margin unavailable"; everything else is unaffected.
 
 ## Step 4 — smoke test before installing the service
 

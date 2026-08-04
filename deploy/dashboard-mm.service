@@ -5,7 +5,10 @@ Wants=network-online.target
 
 [Service]
 WorkingDirectory=/root/dashboard-mm
-EnvironmentFile=/root/dashboard-mm/.env
+# Leading '-' makes the file optional. Without it systemd refuses to start
+# the unit when .env is absent, but a missing API key is a supported state
+# here: the dashboard runs and simply reports account margin as unavailable.
+EnvironmentFile=-/root/dashboard-mm/.env
 # /root is read-only for this unit (see below), so don't even try to write
 # __pycache__ next to the sources.
 Environment=PYTHONDONTWRITEBYTECODE=1
