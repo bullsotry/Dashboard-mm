@@ -13,7 +13,8 @@ import json
 from collections import deque
 from pathlib import Path
 
-from .base import Account, Fill, OrderBook, Position
+from .base import Account, Fill, OrderBook, Position, Quote, Stats
+from .stats import compute_stats
 
 
 class BitunixFileAdapter:
@@ -78,6 +79,71 @@ class BitunixFileAdapter:
         # state — server.py merges the two Bitunix adapters at the route level.
         return None
 
+    def get_quotes(self) -> list[Quote]:
+        """The bot's own resting orders, if it publishes them.
+
+        The key name is not settled across bot versions, so several are
+        accepted and each row is read defensively: an absent or unrecognised
+        shape yields [] and the chart simply draws no quote lines, which is
+        the same degradation path as every other reader here. It is never an
+        error for a bot not to publish this.
+        """
+        data = self._read_viz()
+        if not data:
+            return []
+        raw = None
+        for key in ("quotes", "open_orders", "orders", "resting_orders"):
+            if isinstance(data.get(key), list):
+                raw = data[key]
+                break
+        if raw is None:
+            return []
+
+        quotes: list[Quote] = []
+        for row in raw:
+            try:
+                if isinstance(row, dict):
+                    side = str(row.get("side") or "").lower()
+                    price = float(row.get("price") or 0.0)
+                    size = float(row.get("size") or row.get("qty") or 0.0)
+                elif isinstance(row, (list, tuple)) and len(row) >= 3:
+                    side, price, size = str(row[0]).lower(), float(row[1]), float(row[2])
+                else:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if side in ("bid", "b", "long"):
+                side = "buy"
+            elif side in ("ask", "a", "s", "short"):
+                side = "sell"
+            if side not in ("buy", "sell") or price <= 0:
+                continue
+            quotes.append({"side": side, "price": price, "size": size})
+        return quotes
+
+    def get_source_ts(self) -> float | None:
+        """How fresh the *bot's* state is, not how fresh our poll is. The
+        orderbook timestamp is the bot's own heartbeat: it only advances
+        while the bot is running and writing. Falls back to the file mtime
+        when the payload carries no timestamp."""
+        data = self._read_viz()
+        if data:
+            ob = data.get("orderbook") or {}
+            ts = ob.get("ts")
+            if ts:
+                try:
+                    return float(ts)
+                except (TypeError, ValueError):
+                    pass
+        try:
+            return self._viz_path.stat().st_mtime
+        except OSError:
+            return None
+
+    def get_stats(self) -> Stats:
+        self._poll_fills()
+        return compute_stats(list(self._fills))
+
     def get_recent_fills(self, limit: int = 200) -> list[Fill]:
         self._poll_fills()
         return list(self._fills)[-limit:]
@@ -123,5 +189,9 @@ class BitunixFileAdapter:
                     "side": str(row.get("side") or ""),
                     "price": float(row.get("price") or 0.0),
                     "size": float(row.get("size") or 0.0),
+                    # Kept because for a maker strategy the fee is often the
+                    # difference between a positive and a negative result —
+                    # a gross-only PnL would flatter every window.
+                    "fee": float(row.get("fee") or 0.0),
                 }
             )

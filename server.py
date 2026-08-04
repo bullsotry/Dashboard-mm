@@ -5,6 +5,7 @@ that the frontend polls; everything else is a static file.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -46,10 +47,19 @@ def snapshot(interval: str = DEFAULT_INTERVAL) -> dict:
             "orderbook": file_adapter.get_orderbook(),
             "positions": file_adapter.get_positions(),
             "fills": file_adapter.get_recent_fills(),
+            "quotes": file_adapter.get_quotes(),
+            "stats": file_adapter.get_stats(),
+            # The bot's own heartbeat. Distinct from server_ts below: this
+            # server answers happily while the bot it watches is dead, and
+            # the frontend must be able to tell those two apart.
+            "source_ts": file_adapter.get_source_ts(),
             "account": account_adapter.get_account() if account_adapter else None,
             "klines": kline_adapter.get_klines(interval) if kline_adapter else [],
             "kline_interval": interval,
             "kline_interval_s": interval_seconds(interval),
             "supported_intervals": SUPPORTED_INTERVALS if kline_adapter else [],
         }
-    return {"venues": venues}
+    # Server clock, so the frontend measures bot staleness against the same
+    # clock that produced source_ts instead of against the browser's, which
+    # can be minutes off and would make a healthy bot look dead.
+    return {"server_ts": time.time(), "venues": venues}

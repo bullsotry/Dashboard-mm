@@ -3,7 +3,17 @@
  * tunnel to 127.0.0.1 on the VPS. */
 
 const POLL_MS = 1500;
-const STALE_AFTER_MS = 6000;
+// Two independent failure modes, two independent clocks:
+//   link  — we cannot reach our own server (tunnel dropped, uvicorn died).
+//   bot   — the server answers fine, but the bot stopped writing its state.
+// The second is the dangerous one: everything still renders, just frozen.
+const LINK_STALE_MS = 6000;
+const BOT_STALE_MS = 15000;
+const BOT_DEAD_MS = 60000;
+// Recomputed on a timer rather than per poll, so the age keeps counting up
+// while polls are failing — a badge frozen at "2s" during an outage would
+// reproduce the exact bug this is here to prevent.
+const STATUS_TICK_MS = 500;
 
 // Single source of truth for colours lives in index.html's :root CSS
 // variables (bull/bear sampled from Bitunix's own live chart; the rest set
@@ -81,7 +91,7 @@ let intervalsRendered = false;
 function renderTimeframeBar() {
   if (intervalsRendered) return;
   intervalsRendered = true;
-  const bar = document.getElementById("timeframe-bar");
+  const bar = document.getElementById("tf-buttons");
   bar.innerHTML = SUPPORTED_INTERVALS.map(
     (iv) => `<button class="tf-btn${iv === currentInterval ? " active" : ""}" data-interval="${iv}">${iv}</button>`
   ).join("");
@@ -105,24 +115,101 @@ function renderTimeframeBar() {
   });
 }
 
+// The spread used to be visible only while the order book was expanded,
+// which is the one number you want at a glance on a market-making desk.
+// It lives in the chart label now, book open or not.
 function updateChartLabel() {
+  let live = "";
+  if (lastOrderbook && lastOrderbook.mid > 0) {
+    const bps = ((lastOrderbook.best_ask - lastOrderbook.best_bid) / lastOrderbook.mid) * 10000;
+    live = ` &middot; mid <b>${fmt(lastOrderbook.mid, 2)}</b> &middot; ${fmt(bps, 1)} bps`;
+  }
   document.getElementById("chart-label").innerHTML =
-    `<b>${currentSymbol || "—"}</b> &middot; ${currentInterval} &middot; Last price Bitunix`;
+    `<b>${currentSymbol || "—"}</b> &middot; ${currentInterval}${live}`;
 }
 let currentSymbol = "";
 
-// The adapter itself only re-fetches from Bitunix every ~20s and caches
-// between polls, so calling setData on every ~1.5s poll re-sends identical
-// data most of the time — cheap for 200 rows, and simpler than trying to
-// diff/patch just the in-progress candle.
+// The kline adapter only re-fetches from Bitunix every ~20s and caches
+// between polls, so most ~1.5s polls carry byte-identical candles. Calling
+// setData anyway is not just wasted work: setData is a full series reset,
+// and doing it under the user's cursor is what makes a chart fight back
+// while you pan through history. A cheap signature skips the no-op case.
+let lastCandleSig = "";
+
 function renderCandles(klines) {
   if (!klines || klines.length === 0) return;
+  const last = klines[klines.length - 1];
+  const sig = `${klines.length}|${klines[0].time}|${last.time}|${last.close}|${last.high}|${last.low}`;
+  if (sig === lastCandleSig) return;
+  lastCandleSig = sig;
+
   candleSeries.setData(
     klines.map((k) => ({ time: k.time, open: k.open, high: k.high, low: k.low, close: k.close }))
   );
   // Markers anchor to their candle's high/low, so the primitive needs the
   // bars keyed by time.
   fillMarkers.setCandles(new Map(klines.map((k) => [k.time, { high: k.high, low: k.low }])));
+}
+
+// --- Price lines: where the bot actually sits ---
+// The book shows the market; these show *us* in it. Entry price answers
+// "where am I", resting quotes answer "where are my orders" — the two
+// questions a market-making operator asks a chart.
+let priceLines = [];
+let lastLineSig = "";
+const MAX_QUOTE_LINES_PER_SIDE = 8;
+
+function renderPriceLines(venue) {
+  const quotes = venue.quotes || [];
+  const positions = venue.positions || [];
+  const sig = JSON.stringify([
+    quotes.map((q) => [q.side, q.price, q.size]),
+    positions.map((p) => [p.side, p.entry_price]),
+  ]);
+  if (sig === lastLineSig) return; // redrawing lines every 1.5s makes them flicker
+  lastLineSig = sig;
+
+  for (const line of priceLines) candleSeries.removePriceLine(line);
+  priceLines = [];
+
+  for (const p of positions) {
+    if (!p.entry_price) continue;
+    priceLines.push(
+      candleSeries.createPriceLine({
+        price: p.entry_price,
+        color: token("--accent"),
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Solid,
+        axisLabelVisible: true,
+        title: `entry ${p.side}`,
+      })
+    );
+  }
+
+  // A ladder bot can rest dozens of orders; drawing them all turns the
+  // chart into a comb. Keep the ones nearest the mid — the far end of a
+  // ladder is not what you are watching for.
+  const mid = venue.orderbook && venue.orderbook.mid > 0 ? venue.orderbook.mid : null;
+  const bySide = { buy: [], sell: [] };
+  for (const q of quotes) if (bySide[q.side]) bySide[q.side].push(q);
+  for (const side of ["buy", "sell"]) {
+    let list = bySide[side];
+    if (mid !== null) {
+      list = list.slice().sort((a, b) => Math.abs(a.price - mid) - Math.abs(b.price - mid));
+    }
+    for (const q of list.slice(0, MAX_QUOTE_LINES_PER_SIDE)) {
+      priceLines.push(
+        candleSeries.createPriceLine({
+          price: q.price,
+          color: side === "buy" ? BULL_COLOR : BEAR_COLOR,
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: false,
+          title: q.size ? `${side} ${fmt(q.size, 3)}` : side,
+        })
+      );
+    }
+  }
 }
 
 function addFillMarkers(fills, intervalS) {
@@ -186,6 +273,47 @@ function renderPosition(venue) {
   body.innerHTML = rows.join("");
 }
 
+function fmtDuration(s) {
+  if (!s || s <= 0) return "—";
+  if (s < 90) return `${Math.round(s)}s`;
+  if (s < 5400) return `${Math.round(s / 60)}m`;
+  if (s < 172800) return `${(s / 3600).toFixed(1)}h`;
+  return `${(s / 86400).toFixed(1)}d`;
+}
+
+function renderStats(stats) {
+  const body = document.getElementById("stats-body");
+  const windowEl = document.getElementById("stats-window");
+
+  if (!stats || stats.n_fills === 0) {
+    windowEl.textContent = "—";
+    body.innerHTML = `<div class="empty-note">no fills in window</div>`;
+    return;
+  }
+
+  // The header states the window these numbers actually cover. Without it
+  // every figure below invites the reader to assume "since I started
+  // watching", which is never what it means.
+  windowEl.textContent = `last ${stats.n_fills} fills · ${fmtDuration(stats.span_s)}`;
+
+  const netCls = stats.realised_net >= 0 ? "pnl-pos" : "pnl-neg";
+  const capture =
+    stats.capture_bps === null || stats.capture_bps === undefined
+      ? "—"
+      : `${fmt(stats.capture_bps, 1)} bps`;
+
+  body.innerHTML = `
+    <div class="row"><span class="label">fills</span><span class="val">${stats.n_fills}<small>${stats.n_buys}B / ${stats.n_sells}S</small></span></div>
+    <div class="row"><span class="label">rate</span><span class="val">${fmt(stats.fills_per_hour, 1)}<small>/h</small></span></div>
+    <div class="row"><span class="label">volume</span><span class="val">${fmt(stats.volume_quote, 2)}</span></div>
+    <div class="row"><span class="label">capture</span><span class="val">${capture}</span></div>
+    <div class="row"><span class="label">inventory</span><span class="val">${fmt(stats.inventory_base, 3)}</span></div>
+    <div class="row"><span class="label">realised gross</span><span class="val">${fmt(stats.realised_gross, 4)}</span></div>
+    <div class="row"><span class="label">fees</span><span class="val">-${fmt(stats.fees, 4)}</span></div>
+    <div class="row stat-net"><span class="label">realised net</span><span class="val ${netCls}">${fmt(stats.realised_net, 4)}</span></div>
+  `;
+}
+
 function renderBook(ob) {
   const asksEl = document.getElementById("book-asks");
   const bidsEl = document.getElementById("book-bids");
@@ -221,7 +349,64 @@ bookToggle.addEventListener("click", () => {
   renderBook(bookVisible ? lastOrderbook : null); // don't wait for next poll tick
 });
 
-let lastGoodPollTs = 0;
+// --- Freshness tracking ---
+let lastGoodPollTs = 0; // local clock, for link health
+// Bot age is measured server-side (server_ts - source_ts) and then extended
+// locally. Subtracting the bot's timestamp from the *browser's* clock would
+// report a healthy bot as dead whenever the two machines disagree, which
+// for a VPS in another timezone they routinely do by seconds or more.
+let botAgeAtPollS = null;
+let botAgeMeasuredAt = 0;
+let everConnected = false;
+
+const statusEl = document.getElementById("status");
+const statusTextEl = document.getElementById("status-text");
+const statusDetailEl = document.getElementById("status-detail");
+
+function currentBotAgeS() {
+  if (botAgeAtPollS === null) return null;
+  return botAgeAtPollS + (Date.now() - botAgeMeasuredAt) / 1000;
+}
+
+function renderStatus() {
+  const linkAgeMs = Date.now() - lastGoodPollTs;
+  const botAgeS = currentBotAgeS();
+  let cls, text, detail;
+
+  if (!everConnected) {
+    cls = "";
+    text = "connecting";
+    detail = "";
+  } else if (linkAgeMs > LINK_STALE_MS) {
+    // We cannot reach our own server: nothing on screen can be trusted.
+    cls = "dead";
+    text = "link down";
+    detail = fmtDuration(linkAgeMs / 1000);
+  } else if (botAgeS === null) {
+    cls = "warn";
+    text = "bot unknown";
+    detail = "no timestamp";
+  } else if (botAgeS * 1000 > BOT_DEAD_MS) {
+    cls = "dead";
+    text = "bot dead";
+    detail = fmtDuration(botAgeS);
+  } else if (botAgeS * 1000 > BOT_STALE_MS) {
+    cls = "warn";
+    text = "bot stale";
+    detail = fmtDuration(botAgeS);
+  } else {
+    cls = "ok";
+    text = "live";
+    detail = fmtDuration(botAgeS);
+  }
+
+  statusEl.className = cls;
+  statusTextEl.textContent = text;
+  statusDetailEl.textContent = detail;
+  // Desaturate the data panels on anything but a clean live state, so stale
+  // numbers cannot be misread as current from across the room.
+  document.body.classList.toggle("stale", cls === "warn" || cls === "dead");
+}
 
 async function poll() {
   try {
@@ -231,28 +416,35 @@ async function poll() {
     const venue = data.venues && data.venues.bitunix;
     if (venue) {
       currentSymbol = venue.symbol || "";
+      lastOrderbook = venue.orderbook || null;
       renderTimeframeBar();
       updateChartLabel();
       renderCandles(venue.klines);
       addFillMarkers(venue.fills || [], venue.kline_interval_s);
+      renderPriceLines(venue);
       renderPosition(venue);
-      lastOrderbook = venue.orderbook || null;
+      renderStats(venue.stats);
       renderBook(bookVisible ? lastOrderbook : null);
+
+      if (data.server_ts && venue.source_ts) {
+        botAgeAtPollS = Math.max(0, data.server_ts - venue.source_ts);
+        botAgeMeasuredAt = Date.now();
+      } else {
+        botAgeAtPollS = null;
+      }
     }
     lastGoodPollTs = Date.now();
+    everConnected = true;
   } catch (err) {
-    // No visible status indicator by design — a monitoring dashboard that
-    // silently goes stale is a real failure mode, so it's still logged for
-    // anyone with devtools open, just not surfaced as UI chrome.
     console.warn("poll failed:", err.message);
   }
+  renderStatus();
 }
 
-setInterval(() => {
-  if (Date.now() - lastGoodPollTs > STALE_AFTER_MS) {
-    console.warn(`snapshot stale: no successful poll in over ${STALE_AFTER_MS}ms`);
-  }
-}, STALE_AFTER_MS);
+// Independent of the poll loop on purpose: this is what keeps the badge
+// counting up during an outage, when poll() is throwing and would otherwise
+// never run again.
+setInterval(renderStatus, STATUS_TICK_MS);
 
 poll();
 setInterval(poll, POLL_MS);

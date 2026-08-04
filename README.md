@@ -3,9 +3,24 @@
 Real-time, **read-only** monitoring dashboard for a Bitunix market-making bot.
 
 It renders a candlestick chart (real Bitunix klines) with buy/sell fill
-markers, a position & margin panel, and a toggleable order book. The backend
-is a single FastAPI route (`/snapshot`) that the frontend polls; everything
-else is a static file.
+markers, the bot's own resting quotes and entry prices drawn as price lines,
+a position & margin panel, a performance panel, and a toggleable order book.
+The backend is a single FastAPI route (`/snapshot`) that the frontend polls;
+everything else is a static file.
+
+## Freshness is a first-class signal
+
+The failure mode this dashboard is built to avoid is showing frozen data that
+still looks alive. Two clocks are tracked and displayed separately, because
+they break separately:
+
+- **link** — can the browser still reach the server? (tunnel dropped, server died)
+- **bot** — is the bot still writing its state file, even though the server answers?
+
+The badge counts up on its own timer rather than on the poll loop, so it keeps
+ageing during an outage instead of freezing at its last value. Anything other
+than a clean live state desaturates the data panels, so stale numbers look
+wrong from across the room rather than requiring you to read a small badge.
 
 ## Design constraints
 
@@ -27,11 +42,29 @@ server.py                 FastAPI app, one /snapshot route + static mount
 config.py                 paths, symbols, venue registry (all env-overridable)
 adapters/
   base.py                 shared dataclasses
-  bitunix_files.py        reads the bot's state files (orderbook, positions, fills)
+  stats.py                FIFO realised PnL + fill metrics (pure, no I/O)
+  bitunix_files.py        reads the bot's state files (orderbook, positions, fills, quotes)
   bitunix_account.py      Bitunix REST, signed, GET-only (margin/equity)
   bitunix_klines.py       Bitunix REST, public (candles, 8 timeframes)
 static/                   index.html + app.js + fill_markers.js + charting vendor
+tests/                    hand-computed cases for the PnL engine
 deploy/                   systemd unit
+```
+
+## Reading the performance panel
+
+Every figure is computed over a **bounded window** — the last N fills the
+adapter holds — and the panel header states the window it actually covers.
+`realised gross` is FIFO round-trip PnL with fees excluded; `fees` are what
+the venue reported per fill; `realised net` is the only number that reflects
+a result. Open inventory is deliberately *not* marked to market, and is shown
+separately, so a settled figure is never mixed with a floating one. The limits
+of this calculation are documented at the top of `adapters/stats.py`.
+
+## Tests
+
+```bash
+venv/bin/python tests/test_stats.py
 ```
 
 ## Running locally

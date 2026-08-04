@@ -107,7 +107,7 @@
   /* Same negative-margin trick: the timeframe row *is* the chart module's title bar,
      rather than adding a redundant "CHART" strip. */
   .timeframe-bar {
-    display: flex; gap: 4px; flex: 0 0 auto;
+    display: flex; gap: 4px; flex: 0 0 auto; align-items: center;
     background: var(--title-bar-bg);
     border-bottom: 1px solid var(--panel-border);
     margin: calc(var(--panel-pad-y) * -1) calc(var(--panel-pad-x) * -1) 10px;
@@ -121,6 +121,39 @@
   }
   .tf-btn:hover { border-color: var(--btn-border-active); color: var(--text); }
   .tf-btn.active { background: var(--btn-bg-active); border-color: var(--btn-border-active); color: var(--text); }
+
+  /* ── Freshness ────────────────────────────────────────────────────────
+     A monitoring dashboard that goes stale without saying so is worse than
+     no dashboard: every panel keeps showing plausible numbers. Two clocks
+     are tracked separately because they fail separately — the link (can we
+     reach our own server?) and the bot (is the process still writing?). */
+  #status {
+    margin-left: auto; display: flex; align-items: center; gap: 6px;
+    font-family: var(--title-family); font-size: 10.5px; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--text-dim); white-space: nowrap;
+  }
+  #status .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--text-faint); flex: 0 0 auto;
+  }
+  #status.ok .dot { background: var(--bull); }
+  #status.ok { color: var(--text-dim); }
+  #status.warn .dot { background: var(--accent); }
+  #status.warn { color: var(--accent); }
+  #status.dead .dot { background: var(--bear); animation: pulse 1.2s ease-in-out infinite; }
+  #status.dead { color: var(--bear); }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+  @media (prefers-reduced-motion: reduce) {
+    #status.dead .dot { animation: none; }
+  }
+  #status .detail { font-weight: 400; letter-spacing: 0.02em; color: var(--text-faint); }
+
+  /* When the data is not live, desaturate every panel that displays it. The
+     badge alone is too easy to miss when you glance at a screen; this makes
+     stale data *look* wrong at a distance. The chart keeps its colours —
+     candles are venue history and stay true regardless of the bot. */
+  body.stale #side { opacity: 0.45; filter: grayscale(0.7); transition: opacity 0.2s, filter 0.2s; }
 
   #chart-wrap { position: relative; flex: 1 1 auto; min-height: 420px; }
   #chart { width: 100%; height: 100%; }
@@ -148,6 +181,17 @@
   .pnl-neg { color: var(--bear); }
   .account-block { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--divider); }
   .empty-note { color: var(--text-faint); font-size: 12px; font-style: italic; }
+
+  /* Every figure in the stats panel is computed over a bounded fills
+     window, so the panel states that window in its own header rather than
+     letting the reader assume "today". */
+  .window-note {
+    font-size: 10px; color: var(--text-faint); text-transform: none;
+    letter-spacing: 0; font-weight: 400;
+  }
+  .stat-net { border-top: 1px solid var(--divider); margin-top: 6px; padding-top: 6px; }
+  .stat-net .val { font-size: 14px; font-weight: 700; }
+  .row .val small { color: var(--text-faint); font-size: 10.5px; margin-left: 4px; }
 
   #book-panel { display: none; }
   #book-panel.visible { display: block; }
@@ -177,12 +221,23 @@
     padding: 6px 0; border-top: 1px solid var(--divider); border-bottom: 1px solid var(--divider);
     margin: 4px 0 6px 0;
   }
+
+  /* Below ~900px the fixed 300px rail leaves the chart unusably narrow, so
+     the panels stack under it instead of beside it. */
+  @media (max-width: 900px) {
+    #layout { grid-template-columns: 1fr; }
+    #chart-wrap { min-height: 320px; }
+    #status .detail { display: none; }
+  }
 </style>
 </head>
 <body>
 <div id="layout">
   <div id="chart-pane" class="panel">
-    <div class="timeframe-bar" id="timeframe-bar"></div>
+    <div class="timeframe-bar">
+      <div id="tf-buttons" style="display:flex; gap:4px;"></div>
+      <div id="status"><span class="dot"></span><span id="status-text">connecting</span><span class="detail" id="status-detail"></span></div>
+    </div>
     <div id="chart-wrap">
       <div id="chart-label"></div>
       <div id="chart"></div>
@@ -193,6 +248,11 @@
     <div class="panel" id="position-panel">
       <h2>Position &amp; Margin</h2>
       <div id="position-body"><div class="row"><span class="label">loading…</span></div></div>
+    </div>
+
+    <div class="panel" id="stats-panel">
+      <h2>Performance <span class="window-note" id="stats-window">—</span></h2>
+      <div id="stats-body"><div class="empty-note">no fills yet</div></div>
     </div>
 
     <div class="panel">
