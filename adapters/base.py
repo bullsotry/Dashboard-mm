@@ -58,6 +58,9 @@ class Stats(TypedDict):
     realised_net: float  # realised_gross - fees
     inventory_base: float  # net signed base accumulated over the window
     capture_bps: float | None  # avg sell vs avg buy, None if one side is empty
+    # Set when the realised figures above cannot be trusted, with the reason.
+    # A monitoring panel must refuse to state a PnL it cannot defend.
+    pnl_unreliable: str | None
 
 
 class Position(TypedDict):

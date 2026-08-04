@@ -134,6 +134,51 @@ def test_garbage_rows_are_skipped():
     assert approx(s["inventory_base"], 1.0)
 
 
+def test_reliable_when_replay_matches_the_exchange():
+    # Buy 2, sell 1 -> replay holds +1, exchange agrees. Nothing to warn about.
+    s = compute_stats(
+        [f(1, "buy", 100.0, 2.0), f(2, "sell", 101.0, 1.0)], net_position_base=1.0
+    )
+    assert s["pnl_unreliable"] is None
+
+
+def test_flags_an_incomplete_ledger():
+    # Replay lands on +1 while the exchange holds -5.78: history is missing,
+    # so every close matched lots the replay invented. This is the live case
+    # that produced a confident, wrong PnL.
+    s = compute_stats(
+        [f(1, "buy", 100.0, 2.0), f(2, "sell", 101.0, 1.0)], net_position_base=-5.78
+    )
+    assert s["pnl_unreliable"] is not None
+    assert "ledger incomplete" in s["pnl_unreliable"]
+
+
+def test_small_gap_is_rounding_not_a_missing_history():
+    s = compute_stats(
+        [f(1, "buy", 100.0, 2.0), f(2, "sell", 101.0, 1.0)], net_position_base=1.01
+    )
+    assert s["pnl_unreliable"] is None
+
+
+def test_flags_hedge_mode_even_when_inventory_agrees():
+    # Hedge mode breaks FIFO regardless of whether the net happens to line
+    # up, because netting two independent books is the wrong model entirely.
+    s = compute_stats(
+        [f(1, "buy", 100.0, 2.0), f(2, "sell", 101.0, 1.0)],
+        net_position_base=1.0,
+        hedge_mode=True,
+    )
+    assert s["pnl_unreliable"] is not None
+    assert "hedge" in s["pnl_unreliable"]
+
+
+def test_unknown_position_is_not_an_accusation():
+    # No position published: we cannot check the replay, but we also have no
+    # evidence against it. Silence, not a warning.
+    s = compute_stats([f(1, "buy", 100.0, 2.0)], net_position_base=None)
+    assert s["pnl_unreliable"] is None
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -214,6 +214,13 @@
   .bot-row .nochart { font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
 
   .stat-net { border-top: 1px solid var(--divider); margin-top: 6px; padding-top: 6px; }
+  /* Shown instead of a realised PnL that cannot be defended. Deliberately
+     carries no number: a greyed-out figure is still a figure to be read. */
+  .pnl-blocked-title {
+    font-family: var(--title-family); font-size: 10.5px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent);
+  }
+  .pnl-blocked-why { font-size: 11px; color: var(--text-faint); line-height: 1.4; margin-top: 3px; }
   .stat-net .val { font-size: 14px; font-weight: 700; }
   .row .val small { color: var(--text-faint); font-size: 10.5px; margin-left: 4px; }
 

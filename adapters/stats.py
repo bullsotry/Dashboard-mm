@@ -51,10 +51,18 @@ def _empty() -> Stats:
         "realised_net": 0.0,
         "inventory_base": 0.0,
         "capture_bps": None,
+        "pnl_unreliable": None,
     }
 
 
-def compute_stats(fills: list[Fill]) -> Stats:
+def compute_stats(
+    fills: list[Fill],
+    net_position_base: float | None = None,
+    hedge_mode: bool = False,
+) -> Stats:
+    """`net_position_base` and `hedge_mode` are not used in the arithmetic —
+    they are used to decide whether the arithmetic is trustworthy at all.
+    See `_reliability` below."""
     if not fills:
         return _empty()
 
@@ -127,6 +135,8 @@ def compute_stats(fills: list[Fill]) -> Stats:
         if mid > 0:
             capture_bps = (avg_sell - avg_buy) / mid * 10000.0
 
+    inventory_base = sum(q for q, _ in lots)
+
     return {
         "span_s": span_s,
         "n_fills": n_fills,
@@ -137,6 +147,51 @@ def compute_stats(fills: list[Fill]) -> Stats:
         "realised_gross": realised,
         "fees": fees,
         "realised_net": realised - fees,
-        "inventory_base": sum(q for q, _ in lots),
+        "inventory_base": inventory_base,
         "capture_bps": capture_bps,
+        "pnl_unreliable": _reliability(inventory_base, net_position_base, hedge_mode),
     }
+
+
+# Below this, a base-units gap between the ledger and the exchange is treated
+# as rounding rather than a missing history.
+_INVENTORY_TOLERANCE = 0.05
+
+
+def _reliability(
+    inventory_base: float,
+    net_position_base: float | None,
+    hedge_mode: bool,
+) -> str | None:
+    """Why the realised figures above must not be trusted, or None.
+
+    This exists because the realised PnL was wrong in production and looked
+    confident while being so. Two conditions make it structurally wrong, and
+    neither is detectable from the fills alone:
+
+    1. **The ledger is incomplete.** If replaying every fill lands on an
+       inventory the exchange disagrees with, the window opened mid-position
+       and the lots that opened it were never recorded. Closes then match
+       against lots invented by the replay, at prices that were never paid.
+       Observed live: a ledger implying -5.78 base against a real +0.22.
+
+    2. **Hedge mode.** With a long and a short open at once, a buy may close
+       the short or add to the long, and the ledger records no flag saying
+       which. FIFO netting collapses two independent books into one and
+       realises round trips the exchange never settled.
+
+    The symptom either way is a figure that swings with the window size —
+    the same fills gave -1.78, -14.05 and -8.84 over 500, 2000 and all
+    2113 rows. A number that depends on where you cut is not a measurement.
+    """
+    if hedge_mode:
+        return "hedge mode: fills carry no position side, so FIFO netting invents round trips"
+    if net_position_base is None:
+        return None
+    gap = abs(inventory_base - net_position_base)
+    if gap > _INVENTORY_TOLERANCE:
+        return (
+            f"ledger incomplete: replay implies {inventory_base:+.2f} base, "
+            f"exchange holds {net_position_base:+.2f}"
+        )
+    return None

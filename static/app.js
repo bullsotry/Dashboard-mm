@@ -403,20 +403,41 @@ function renderStats(stats) {
   // watching", which is never what it means.
   windowEl.textContent = `last ${stats.n_fills} fills · ${fmtDuration(stats.span_s)}`;
 
-  const netCls = stats.realised_net >= 0 ? "pnl-pos" : "pnl-neg";
   const capture =
     stats.capture_bps === null || stats.capture_bps === undefined
       ? "—"
       : `${fmt(stats.capture_bps, 1)} bps`;
 
-  body.innerHTML = `
+  // Everything above the divider is a direct count or sum over the fills:
+  // true whatever else is broken. Everything below is a reconstruction that
+  // assumes the ledger is complete and the account nets its position.
+  const measured = `
     <div class="row"><span class="label">fills</span><span class="val">${stats.n_fills}<small>${stats.n_buys}B / ${stats.n_sells}S</small></span></div>
     <div class="row"><span class="label">rate</span><span class="val">${fmt(stats.fills_per_hour, 1)}<small>/h</small></span></div>
     <div class="row"><span class="label">volume</span><span class="val">${fmt(stats.volume_quote, 2)}</span></div>
+    <div class="row"><span class="label">fees paid</span><span class="val pnl-neg">-${fmt(stats.fees, 4)}</span></div>
     <div class="row"><span class="label">capture</span><span class="val">${capture}</span></div>
+  `;
+
+  if (stats.pnl_unreliable) {
+    // A PnL that cannot be defended is not shown as a number. Printing it
+    // greyed out would still leave a figure on screen to be read and
+    // believed, which is exactly how the wrong one got trusted.
+    body.innerHTML =
+      measured +
+      `<div class="stat-net pnl-blocked">
+         <div class="pnl-blocked-title">realised pnl unavailable</div>
+         <div class="pnl-blocked-why">${stats.pnl_unreliable}</div>
+       </div>`;
+    return;
+  }
+
+  const netCls = stats.realised_net >= 0 ? "pnl-pos" : "pnl-neg";
+  body.innerHTML =
+    measured +
+    `
     <div class="row"><span class="label">inventory</span><span class="val">${fmt(stats.inventory_base, 3)}</span></div>
     <div class="row"><span class="label">realised gross</span><span class="val">${fmt(stats.realised_gross, 4)}</span></div>
-    <div class="row"><span class="label">fees</span><span class="val">-${fmt(stats.fees, 4)}</span></div>
     <div class="row stat-net"><span class="label">realised net</span><span class="val ${netCls}">${fmt(stats.realised_net, 4)}</span></div>
   `;
 }

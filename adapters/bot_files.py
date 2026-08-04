@@ -170,7 +170,28 @@ class BotStateAdapter:
 
     def get_stats(self) -> Stats:
         self._poll_fills()
-        return compute_stats(list(self._fills))
+        # The exchange's own position is what makes the replay checkable: if
+        # replaying the ledger lands somewhere else, the ledger is missing
+        # history and the realised PnL built on it is fiction.
+        data = self._read_viz() or {}
+        net = None
+        pos = data.get("position")
+        if isinstance(pos, dict) and pos.get("net_position_base") is not None:
+            try:
+                net = float(pos["net_position_base"])
+            except (TypeError, ValueError):
+                net = None
+        if net is None:
+            longs = data.get("position_long") or {}
+            shorts = data.get("position_short") or {}
+            if longs or shorts:
+                net = float(longs.get("qty_base") or 0.0) - float(shorts.get("qty_base") or 0.0)
+
+        hedge = bool(
+            float((data.get("position_long") or {}).get("qty_base") or 0.0) > 0
+            and float((data.get("position_short") or {}).get("qty_base") or 0.0) > 0
+        )
+        return compute_stats(list(self._fills), net_position_base=net, hedge_mode=hedge)
 
     def get_recent_fills(self, limit: int = 500) -> list[Fill]:
         self._poll_fills()
