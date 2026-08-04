@@ -1,28 +1,41 @@
-"""Single place that knows about paths, symbols, and which adapters are active.
+"""Where to look for bots, and which venue-specific adapters exist.
 
-To add a venue later: write its adapter module, add one entry to VENUES,
-nothing else in the repo changes.
+There is deliberately no list of bots here. Bots are discovered by scanning
+for the state files they write (see adapters/discovery.py), so starting a new
+bot is enough to make it appear — no config change, no restart. What *is*
+configured here is where to scan and which exchanges have market-data
+support.
 """
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 from adapters.bitunix_account import BitunixAccountAdapter
-from adapters.bitunix_files import BitunixFileAdapter
 from adapters.bitunix_klines import BitunixKlineAdapter
 
-# Where the v17mm bot (read-only) publishes its state. Overridable via env
-# so the dashboard can run against a different bot install without a code
-# change.
-BITUNIX_SYMBOL = os.environ.get("BITUNIX_SYMBOL", "SOLUSDT")
-BITUNIX_VIZ_PATH = Path(
-    os.environ.get("BITUNIX_VIZ_PATH", "/root/bots/v17mm/bitunix_mm/.v15mm_hl_viz.json")
-)
-BITUNIX_FILLS_PATH = Path(
-    os.environ.get("BITUNIX_FILLS_PATH", "/root/.v17mm_tracker/fills.jsonl")
-)
+# Roots scanned for bot state files. Globs, colon-separated, overridable so
+# the dashboard can watch a different install without a code change. The
+# defaults cover the /root/bots/<bot>/<leg>/ layout this fleet uses.
+VIZ_GLOBS = os.environ.get(
+    "VIZ_GLOBS",
+    "/root/bots/*/*/.*viz*.json:/root/bots/*/.*viz*.json",
+).split(":")
+
+FILLS_GLOBS = os.environ.get(
+    "FILLS_GLOBS",
+    "/root/.*_tracker/fills.jsonl:/root/bots/*/fills.jsonl",
+).split(":")
+
+# How often the filesystem is rescanned for new or vanished bots. This is
+# the worst-case delay between a bot starting and appearing on screen.
+DISCOVERY_INTERVAL_S = float(os.environ.get("DISCOVERY_INTERVAL_S", "15.0"))
+
+# How many fills each bot keeps for its performance window. Larger windows
+# make realised PnL less distorted by truncation (the lots that opened the
+# current position are more likely to fall inside the window) at the cost of
+# memory per bot.
+FILLS_MAXLEN = int(os.environ.get("FILLS_MAXLEN", "2000"))
 
 POLL_INTERVAL_S = float(os.environ.get("POLL_INTERVAL_S", "1.0"))
 ACCOUNT_POLL_INTERVAL_S = float(os.environ.get("ACCOUNT_POLL_INTERVAL_S", "5.0"))
@@ -32,15 +45,20 @@ BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
 BIND_PORT = int(os.environ.get("BIND_PORT", "8091"))
 
 
-def build_bitunix_file_adapter() -> BitunixFileAdapter:
-    return BitunixFileAdapter(
-        symbol=BITUNIX_SYMBOL,
-        viz_path=BITUNIX_VIZ_PATH,
-        fills_path=BITUNIX_FILLS_PATH,
-    )
+def build_kline_adapter(exchange: str, symbol: str):
+    """Candles for a discovered bot, or None if that exchange has no
+    market-data adapter yet. A bot on an unsupported exchange still shows
+    its book, position, quotes and performance — it just has no chart,
+    which is a far better outcome than not appearing at all."""
+    if exchange == "bitunix":
+        return BitunixKlineAdapter(symbol=symbol, poll_interval_s=KLINE_POLL_INTERVAL_S)
+    return None
 
 
-def build_bitunix_account_adapter() -> BitunixAccountAdapter | None:
+def build_account_adapter(exchange: str):
+    """Account margin, only where credentials exist for that exchange."""
+    if exchange != "bitunix":
+        return None
     api_key = os.environ.get("BITUNIX_API_KEY")
     secret_key = os.environ.get("BITUNIX_SECRET_KEY")
     if not api_key or not secret_key:
@@ -50,21 +68,3 @@ def build_bitunix_account_adapter() -> BitunixAccountAdapter | None:
         secret_key=secret_key,
         poll_interval_s=ACCOUNT_POLL_INTERVAL_S,
     )
-
-
-def build_bitunix_kline_adapter() -> BitunixKlineAdapter:
-    return BitunixKlineAdapter(
-        symbol=BITUNIX_SYMBOL,
-        poll_interval_s=KLINE_POLL_INTERVAL_S,
-    )
-
-
-# v1: exactly one venue, one bot, one book. Registered here so server.py
-# never hardcodes "bitunix" anywhere in its own logic.
-VENUES = {
-    "bitunix": {
-        "file_adapter": build_bitunix_file_adapter,
-        "account_adapter": build_bitunix_account_adapter,
-        "kline_adapter": build_bitunix_kline_adapter,
-    }
-}

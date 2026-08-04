@@ -31,9 +31,13 @@ wrong from across the room rather than requiring you to read a small badge.
 - **Binds to localhost only.** `BIND_HOST` defaults to `127.0.0.1`. There is
   no authentication layer, so the dashboard is reached over an SSH tunnel,
   never by exposing the port.
-- **Venue-agnostic seams.** `config.VENUES` is the single registry; adding a
-  venue is a config change plus an adapter module, not a `server.py` change.
-  v1 ships one venue (Bitunix).
+- **Bots are discovered, not configured.** There is no list of bots anywhere.
+  The server scans for the state files bots write and reads each bot's
+  identity out of the file itself, so a bot started long after the dashboard
+  appears on its own within seconds, and one that stops is shown as dead
+  rather than silently vanishing. Adding a venue means adding market-data
+  adapters for it; a bot on an unsupported exchange still shows its book,
+  position, quotes and performance, just without candles.
 
 ## Layout
 
@@ -42,8 +46,9 @@ server.py                 FastAPI app, one /snapshot route + static mount
 config.py                 paths, symbols, venue registry (all env-overridable)
 adapters/
   base.py                 shared dataclasses
+  discovery.py            finds bots by scanning for the files they write
   stats.py                FIFO realised PnL + fill metrics (pure, no I/O)
-  bitunix_files.py        reads the bot's state files (orderbook, positions, fills, quotes)
+  bot_files.py            reads one bot's state (orderbook, positions, fills, quotes)
   bitunix_account.py      Bitunix REST, signed, GET-only (margin/equity)
   bitunix_klines.py       Bitunix REST, public (candles, 8 timeframes)
 static/                   index.html + app.js + fill_markers.js + charting vendor

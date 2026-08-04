@@ -47,7 +47,8 @@ ssh "$VPS" 'mkdir -p /root/dashboard-mm'
 tar czf - \
   server.py config.py requirements.txt \
   adapters/__init__.py adapters/base.py adapters/stats.py \
-  adapters/bitunix_files.py adapters/bitunix_account.py adapters/bitunix_klines.py \
+  adapters/discovery.py adapters/bot_files.py \
+  adapters/bitunix_account.py adapters/bitunix_klines.py \
   static/index.html static/app.js static/fill_markers.js \
   static/vendor/lightweight-charts.standalone.production.js \
   tests/test_stats.py \
@@ -55,13 +56,18 @@ tar czf - \
 | ssh "$VPS" 'tar xzf - -C /root/dashboard-mm'
 ```
 
-The host must be the one the bot runs on: this dashboard reads the bot's
-state files from the local filesystem, so deploying it anywhere else yields
-an empty screen. Confirm before copying:
+The host must be one the bots run on: this dashboard discovers bots by
+scanning the local filesystem for the state files they write, so deploying it
+anywhere else yields an empty screen. Confirm there is something to find:
 
 ```bash
-ssh "$VPS" 'ls -l /root/bots/v17mm/bitunix_mm/.v15mm_hl_viz.json /root/.v17mm_tracker/fills.jsonl'
+ssh "$VPS" 'ls -l /root/bots/*/*/.*viz*.json /root/.*_tracker/fills.jsonl'
 ```
+
+Bots are not configured anywhere — whatever those globs match is what shows
+up, and a bot started later appears on its own within `DISCOVERY_INTERVAL_S`
+(15s by default). Override `VIZ_GLOBS` / `FILLS_GLOBS` if this host lays its
+bots out differently.
 
 ## Step 2 — venv + dependencies
 

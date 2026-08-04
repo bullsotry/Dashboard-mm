@@ -273,6 +273,79 @@ function renderPosition(venue) {
   body.innerHTML = rows.join("");
 }
 
+// --- Bot selection ---
+// null means "let the server pick the freshest", which is what a first load
+// wants: land on whatever is actually running rather than on an alphabetical
+// first entry that may have been dead for days.
+let currentBotKey = null;
+let lastBotsSig = "";
+
+function resetChartState() {
+  seenFillTimes = new Set();
+  fillBuckets = new Map();
+  fillMarkers.setMarkers([]);
+  candleSeries.setData([]);
+  lastCandleSig = "";
+  lastLineSig = "";
+  for (const line of priceLines) candleSeries.removePriceLine(line);
+  priceLines = [];
+}
+
+function botStateClass(ageS) {
+  if (ageS === null) return "";
+  if (ageS * 1000 > BOT_DEAD_MS) return "dead";
+  if (ageS * 1000 > BOT_STALE_MS) return "warn";
+  return "live";
+}
+
+function renderBotList(bots, serverTs, selectedKey) {
+  const body = document.getElementById("bots-body");
+  const countEl = document.getElementById("bots-count");
+  if (!bots || bots.length === 0) {
+    countEl.textContent = "—";
+    body.innerHTML = `<div class="empty-note">no bot found</div>`;
+    lastBotsSig = "";
+    return;
+  }
+
+  const live = bots.filter(
+    (b) => b.source_ts && (serverTs - b.source_ts) * 1000 <= BOT_STALE_MS
+  ).length;
+  countEl.textContent = `${live} live / ${bots.length}`;
+
+  // Rebuilding this list every 1.5s would kill hover and any text selection
+  // in it, so only touch the DOM when something actually changed. Ages are
+  // bucketed to the second for the same reason.
+  const sig = bots
+    .map((b) => `${b.key}|${b.source_ts ? Math.round(serverTs - b.source_ts) : "x"}`)
+    .join(",") + `|${selectedKey}`;
+  if (sig === lastBotsSig) return;
+  lastBotsSig = sig;
+
+  body.innerHTML = bots
+    .map((b) => {
+      const ageS = b.source_ts ? Math.max(0, serverTs - b.source_ts) : null;
+      const cls = botStateClass(ageS);
+      const active = b.key === selectedKey ? " active" : "";
+      return `<div class="bot-row ${cls}${active}" data-bot="${b.key}">
+        <span class="dot"></span>
+        <span class="name">${b.label}</span>
+        <span class="age">${ageS === null ? "—" : fmtDuration(ageS)}</span>
+      </div>`;
+    })
+    .join("");
+}
+
+document.getElementById("bots-body").addEventListener("click", (e) => {
+  const row = e.target.closest(".bot-row");
+  if (!row || row.dataset.bot === currentBotKey) return;
+  currentBotKey = row.dataset.bot;
+
+  resetChartState();
+  lastBotsSig = "";
+  poll();
+});
+
 function fmtDuration(s) {
   if (!s || s <= 0) return "—";
   if (s < 90) return `${Math.round(s)}s`;
@@ -410,10 +483,23 @@ function renderStatus() {
 
 async function poll() {
   try {
-    const resp = await fetch(`/snapshot?interval=${encodeURIComponent(currentInterval)}`, { cache: "no-store" });
+    let url = `/snapshot?interval=${encodeURIComponent(currentInterval)}`;
+    if (currentBotKey) url += `&bot=${encodeURIComponent(currentBotKey)}`;
+    const resp = await fetch(url, { cache: "no-store" });
     if (!resp.ok) throw new Error(`http ${resp.status}`);
     const data = await resp.json();
-    const venue = data.venues && data.venues.bitunix;
+
+    renderBotList(data.bots, data.server_ts, data.bot);
+    // The server honours the requested bot when it still exists, so a
+    // mismatch means either no choice had been made yet (first load lands on
+    // the freshest bot) or the chosen bot vanished and was substituted.
+    // Both cases want the same thing: adopt it and clear the old bot's chart.
+    if (data.bot && data.bot !== currentBotKey) {
+      currentBotKey = data.bot;
+      resetChartState();
+    }
+
+    const venue = data.venue;
     if (venue) {
       currentSymbol = venue.symbol || "";
       lastOrderbook = venue.orderbook || null;
@@ -432,6 +518,18 @@ async function poll() {
       } else {
         botAgeAtPollS = null;
       }
+    } else {
+      // Nothing discovered at all. The link is healthy, so say so rather
+      // than showing the last bot's numbers next to a green badge.
+      currentBotKey = null;
+      currentSymbol = "";
+      lastOrderbook = null;
+      botAgeAtPollS = null;
+      resetChartState();
+      renderPosition({ positions: [], account: null });
+      renderStats(null);
+      renderBook(null);
+      updateChartLabel();
     }
     lastGoodPollTs = Date.now();
     everConnected = true;

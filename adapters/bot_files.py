@@ -1,10 +1,15 @@
-"""Bitunix adapter, file half: orderbook + positions + fills.
+"""Reads one bot's published state: orderbook, positions, resting orders, fills.
 
-Reads two files the v17mm bot (and its separate tracker service) already
-publish. Never writes to them, never imports anything from the bot's code,
-never touches the bot's process. If a file is missing or briefly invalid
-(mid-write), methods return None / [] rather than raising — a monitoring
-dashboard must degrade quietly, not crash a poll loop.
+Venue-agnostic on purpose. This was originally written as a Bitunix adapter,
+but nothing in it was ever Bitunix-specific — it reads a JSON state file and
+a JSONL fill ledger, both of which every bot in this fleet writes in the same
+shape. Keeping one reader means a new venue costs nothing here; only the
+market-data adapters (klines, account) are venue-specific.
+
+Never writes to these files, never imports the bot's code, never touches the
+bot's process. If a file is missing or briefly invalid (caught mid atomic
+write), methods return None / [] rather than raising — a monitoring dashboard
+must degrade quietly, not crash a poll loop.
 """
 
 from __future__ import annotations
@@ -17,10 +22,16 @@ from .base import Account, Fill, OrderBook, Position, Quote, Stats
 from .stats import compute_stats
 
 
-class BitunixFileAdapter:
-    venue_name = "bitunix"
-
-    def __init__(self, symbol: str, viz_path: Path, fills_path: Path, fills_maxlen: int = 500):
+class BotStateAdapter:
+    def __init__(
+        self,
+        venue_name: str,
+        symbol: str,
+        viz_path: Path,
+        fills_path: Path | None,
+        fills_maxlen: int = 2000,
+    ):
+        self.venue_name = venue_name
         self.symbol = symbol
         self._viz_path = viz_path
         self._fills_path = fills_path
@@ -32,7 +43,7 @@ class BitunixFileAdapter:
         try:
             with open(self._viz_path, "r") as f:
                 return json.load(f)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             # OSError: file missing/being rewritten. JSONDecodeError: caught
             # mid atomic-write race (rare, self-heals next poll).
             return None
@@ -71,28 +82,38 @@ class BitunixFileAdapter:
                     "unrealised_pnl": p.get("unrealised_pnl"),
                 }
             )
+        if positions:
+            return positions
+
+        # Bots that run a single net book publish `position` instead of the
+        # long/short pair. Reported as one side so the panel is identical.
+        p = data.get("position")
+        if isinstance(p, dict):
+            qty = float(p.get("net_position_base") or p.get("qty_base") or 0.0)
+            if qty:
+                positions.append(
+                    {
+                        "side": "LONG" if qty > 0 else "SHORT",
+                        "qty_base": abs(qty),
+                        "entry_price": p.get("entry_price"),
+                        "mark_price": p.get("mark_price"),
+                        "unrealised_pnl": p.get("unrealised_pnl"),
+                    }
+                )
         return positions
 
-    def get_account(self) -> Account | None:
-        # Account/margin comes from BitunixAccountAdapter (live REST poll),
-        # not from bot-published files. This adapter never reports account
-        # state — server.py merges the two Bitunix adapters at the route level.
-        return None
-
     def get_quotes(self) -> list[Quote]:
-        """The bot's own resting orders, if it publishes them.
+        """The bot's own resting orders.
 
-        The key name is not settled across bot versions, so several are
-        accepted and each row is read defensively: an absent or unrecognised
-        shape yields [] and the chart simply draws no quote lines, which is
-        the same degradation path as every other reader here. It is never an
-        error for a bot not to publish this.
+        Key name and row shape vary across bot versions, so several are
+        accepted and each row is read defensively. A bot that publishes none
+        yields [] and the chart simply draws no quote lines — never an error.
         """
         data = self._read_viz()
         if not data:
             return []
         raw = None
-        for key in ("quotes", "open_orders", "orders", "resting_orders"):
+        for key in ("open_orders", "quotes", "orders", "resting_orders"):
             if isinstance(data.get(key), list):
                 raw = data[key]
                 break
@@ -103,6 +124,9 @@ class BitunixFileAdapter:
         for row in raw:
             try:
                 if isinstance(row, dict):
+                    # A shared ledger can carry other symbols; skip them.
+                    if row.get("symbol") and row["symbol"] != self.symbol:
+                        continue
                     side = str(row.get("side") or "").lower()
                     price = float(row.get("price") or 0.0)
                     size = float(row.get("size") or row.get("qty") or 0.0)
@@ -124,31 +148,37 @@ class BitunixFileAdapter:
     def get_source_ts(self) -> float | None:
         """How fresh the *bot's* state is, not how fresh our poll is. The
         orderbook timestamp is the bot's own heartbeat: it only advances
-        while the bot is running and writing. Falls back to the file mtime
-        when the payload carries no timestamp."""
+        while the bot is running and writing. Falls back to the payload's
+        top-level timestamp, then to the file mtime."""
         data = self._read_viz()
         if data:
-            ob = data.get("orderbook") or {}
-            ts = ob.get("ts")
-            if ts:
-                try:
-                    return float(ts)
-                except (TypeError, ValueError):
-                    pass
+            for candidate in ((data.get("orderbook") or {}).get("ts"), data.get("timestamp")):
+                if candidate:
+                    try:
+                        return float(candidate)
+                    except (TypeError, ValueError):
+                        continue
         try:
             return self._viz_path.stat().st_mtime
         except OSError:
             return None
 
+    def get_account(self) -> Account | None:
+        # Account/margin comes from a venue REST adapter, not from bot-
+        # published files. server.py merges the two at the route level.
+        return None
+
     def get_stats(self) -> Stats:
         self._poll_fills()
         return compute_stats(list(self._fills))
 
-    def get_recent_fills(self, limit: int = 200) -> list[Fill]:
+    def get_recent_fills(self, limit: int = 500) -> list[Fill]:
         self._poll_fills()
         return list(self._fills)[-limit:]
 
     def _poll_fills(self) -> None:
+        if self._fills_path is None:
+            return
         try:
             st = self._fills_path.stat()
         except OSError:
@@ -181,7 +211,13 @@ class BitunixFileAdapter:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            # One ledger serves the whole fleet, so filter on both axes.
+            # Filtering by symbol alone would mix two venues trading the
+            # same pair into a single PnL.
             if row.get("symbol") != self.symbol:
+                continue
+            venue = row.get("venue")
+            if venue and venue != self.venue_name:
                 continue
             self._fills.append(
                 {
