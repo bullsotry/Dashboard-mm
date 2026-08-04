@@ -1,0 +1,31 @@
+[Unit]
+Description=MM monitoring dashboard (read-only observer)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/root/dashboard-mm
+EnvironmentFile=/root/dashboard-mm/.env
+# /root is read-only for this unit (see below), so don't even try to write
+# __pycache__ next to the sources.
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/root/dashboard-mm/venv/bin/uvicorn server:app --host 127.0.0.1 --port 8091
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# This service observes and must never write. Enforced by the kernel, not
+# just by convention, so a bug here cannot corrupt the bot's state files.
+# ProtectHome=read-only is what covers /root (the bot's files live there);
+# ProtectSystem=strict covers the rest of the filesystem.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,29 @@
+# ── Secrets ───────────────────────────────────────────────────────────────
+# .env.example is the only env file that may ever be committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials.json
+secrets.json
+
+# ── Bot state / market data (never belongs in a public repo) ───────────────
+*.jsonl
+*.log
+.v15mm_hl_viz.json
+
+# ── Python ────────────────────────────────────────────────────────────────
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ── OS / editor ───────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp

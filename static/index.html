@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>MM Dashboard — Bitunix</title>
+<style>
+  /* ── High-contrast terminal (Bloomberg) ───────────────────────────────
+     Pure black, hard square-cornered panels with bright borders and a
+     filled title bar per module. Strong section separation, so more
+     modules (more bots) can sit on one screen without visual mush. */
+  :root {
+    color-scheme: dark;
+    /* Sampled directly from Bitunix's own live SOLUSDT chart (candle
+       bodies, order-book rows, Buy/Sell action buttons) so this dashboard
+       uses their exact green/red, not an approximation. */
+    --bull: #0ecb81;
+    --bear: #fa5252;
+
+    --page-bg: #000000;
+    --panel-bg: #000000;
+    --panel-border: #3d424a;
+    --panel-radius: 0px;
+    --panel-pad-y: 12px;
+    --panel-pad-x: 14px;
+    --gap: 10px;
+
+    --text: #e8eaec;
+    --text-dim: #9aa0a6;
+    --text-faint: #6a7076;
+    --divider: #2a2e34;
+    --accent: #e8a33d; /* amber section titles — the Bloomberg tell */
+
+    --chart-bg: #000000;
+    --chart-text: #8a9096;
+    --chart-grid: #202429;
+    --chart-axis-border: #3d424a;
+
+    --title-bar-bg: #16181c;
+    --title-weight: 700;
+    --title-size: 10.5px;
+    --title-family: ui-monospace, Menlo, monospace;
+
+    --btn-border: #3d424a;
+    --btn-radius: 0px;
+    --btn-bg-active: #22262c;
+    --btn-border-active: #5a616b;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--page-bg);
+    color: var(--text);
+  }
+  body { display: flex; flex-direction: column; }
+
+  #layout {
+    display: grid;
+    grid-template-columns: 1fr 300px;
+    gap: var(--gap);
+    padding: var(--gap);
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  #chart-pane { display: flex; flex-direction: column; min-height: 0; }
+
+  .panel {
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--panel-radius);
+    padding: var(--panel-pad-y) var(--panel-pad-x);
+  }
+  .panel h2 {
+    font-family: var(--title-family);
+    font-size: var(--title-size);
+    font-weight: var(--title-weight);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    /* A real title bar spanning the panel edge-to-edge. Negative margins
+       matched to the panel padding keep this to CSS only — no extra
+       wrapper element in the markup. */
+    background: var(--title-bar-bg);
+    border-bottom: 1px solid var(--panel-border);
+    margin: calc(var(--panel-pad-y) * -1) calc(var(--panel-pad-x) * -1) 10px;
+    padding: 7px var(--panel-pad-x);
+  }
+
+  .panel h2 button {
+    font-size: 10.5px;
+    font-family: var(--title-family);
+    background: none;
+    border: 1px solid var(--btn-border);
+    color: var(--text-dim);
+    border-radius: var(--btn-radius);
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .panel h2 button:hover { border-color: var(--btn-border-active); color: var(--text); }
+
+  /* Same negative-margin trick: the timeframe row *is* the chart module's title bar,
+     rather than adding a redundant "CHART" strip. */
+  .timeframe-bar {
+    display: flex; gap: 4px; flex: 0 0 auto;
+    background: var(--title-bar-bg);
+    border-bottom: 1px solid var(--panel-border);
+    margin: calc(var(--panel-pad-y) * -1) calc(var(--panel-pad-x) * -1) 10px;
+    padding: 6px var(--panel-pad-x);
+  }
+  .tf-btn {
+    font-family: var(--title-family); font-size: 11px; font-weight: 600;
+    background: none; border: 1px solid var(--btn-border); color: var(--text-dim);
+    border-radius: var(--btn-radius); padding: 4px 10px; cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+  }
+  .tf-btn:hover { border-color: var(--btn-border-active); color: var(--text); }
+  .tf-btn.active { background: var(--btn-bg-active); border-color: var(--btn-border-active); color: var(--text); }
+
+  #chart-wrap { position: relative; flex: 1 1 auto; min-height: 420px; }
+  #chart { width: 100%; height: 100%; }
+  #chart-label {
+    position: absolute; top: 8px; left: 12px; z-index: 5;
+    font-size: 12px; color: var(--text-dim); letter-spacing: 0.01em;
+    pointer-events: none; user-select: none;
+  }
+  #chart-label b { color: var(--text); font-weight: 600; }
+
+  #side { display: flex; flex-direction: column; gap: var(--gap); min-height: 0; }
+
+  .row { display: flex; justify-content: space-between; align-items: baseline; font-size: 12.5px; padding: 3px 0; }
+  .row .label { color: var(--text-dim); }
+  .row .val { font-family: ui-monospace, Menlo, monospace; color: var(--text); }
+  .pos-group { padding: 6px 0; }
+  .pos-group + .pos-group { border-top: 1px solid var(--divider); margin-top: 4px; }
+  .pos-side-label {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+    padding: 1px 6px; border-radius: var(--btn-radius); display: inline-block; margin-bottom: 4px;
+  }
+  .pos-side-label.long { color: var(--bull); background: rgba(14, 203, 129, 0.14); }
+  .pos-side-label.short { color: var(--bear); background: rgba(250, 82, 82, 0.14); }
+  .pnl-pos { color: var(--bull); }
+  .pnl-neg { color: var(--bear); }
+  .account-block { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--divider); }
+  .empty-note { color: var(--text-faint); font-size: 12px; font-style: italic; }
+
+  #book-panel { display: none; }
+  #book-panel.visible { display: block; }
+  .book-header {
+    display: flex; justify-content: space-between;
+    font-size: 10px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 0 0 4px 0;
+  }
+  .book-side { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .book-row {
+    position: relative;
+    display: flex; justify-content: space-between;
+    padding: 2px 4px;
+    border-radius: var(--btn-radius);
+  }
+  .book-row .depth-bar {
+    position: absolute; top: 0; bottom: 0; right: 0;
+    z-index: 0; border-radius: var(--btn-radius);
+  }
+  .book-row span { position: relative; z-index: 1; }
+  .book-row.ask { color: var(--bear); }
+  .book-row.ask .depth-bar { background: rgba(250, 82, 82, 0.16); }
+  .book-row.bid { color: var(--bull); }
+  .book-row.bid .depth-bar { background: rgba(14, 203, 129, 0.16); }
+  .spread-line {
+    text-align: center; font-size: 11px; color: var(--text-dim);
+    padding: 6px 0; border-top: 1px solid var(--divider); border-bottom: 1px solid var(--divider);
+    margin: 4px 0 6px 0;
+  }
+</style>
+</head>
+<body>
+<div id="layout">
+  <div id="chart-pane" class="panel">
+    <div class="timeframe-bar" id="timeframe-bar"></div>
+    <div id="chart-wrap">
+      <div id="chart-label"></div>
+      <div id="chart"></div>
+    </div>
+  </div>
+
+  <div id="side">
+    <div class="panel" id="position-panel">
+      <h2>Position &amp; Margin</h2>
+      <div id="position-body"><div class="row"><span class="label">loading…</span></div></div>
+    </div>
+
+    <div class="panel">
+      <h2>Order Book <button id="book-toggle">show</button></h2>
+      <div id="book-panel">
+        <div class="book-header"><span>Price</span><span>Size</span></div>
+        <div class="book-side" id="book-asks"></div>
+        <div class="spread-line" id="book-spread">—</div>
+        <div class="book-side" id="book-bids"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+<script src="/static/fill_markers.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
