@@ -70,6 +70,9 @@ new ResizeObserver((entries) => {
 const fillMarkers = new FillMarkersPrimitive({ bull: BULL_COLOR, bear: BEAR_COLOR });
 candleSeries.attachPrimitive(fillMarkers);
 
+const priceTags = new PriceTagsPrimitive();
+candleSeries.attachPrimitive(priceTags);
+
 let seenFillTimes = new Set();
 // Fills are bucketed to their candle's open time, one badge per (bucket,
 // side). An MM bot routinely fills several times inside a single 1m candle;
@@ -155,7 +158,11 @@ function renderCandles(klines) {
 // The book shows the market; these show *us* in it. Entry price answers
 // "where am I", resting quotes answer "where are my orders" — the two
 // questions a market-making operator asks a chart.
-let priceLines = [];
+// Rendering is delegated to the PriceTags primitive: the built-in
+// createPriceLine has no collision handling, and a market maker's orders sit
+// a few ticks apart, which is exactly when the built-in labels stack on top
+// of each other. Same data as before — side, size, price — only the drawing
+// changed.
 let lastLineSig = "";
 const MAX_QUOTE_LINES_PER_SIDE = 8;
 
@@ -166,24 +173,20 @@ function renderPriceLines(venue) {
     quotes.map((q) => [q.side, q.price, q.size]),
     positions.map((p) => [p.side, p.entry_price]),
   ]);
-  if (sig === lastLineSig) return; // redrawing lines every 1.5s makes them flicker
+  if (sig === lastLineSig) return; // rebuilding every 1.5s makes tags flicker
   lastLineSig = sig;
 
-  for (const line of priceLines) candleSeries.removePriceLine(line);
-  priceLines = [];
+  const tags = [];
 
   for (const p of positions) {
     if (!p.entry_price) continue;
-    priceLines.push(
-      candleSeries.createPriceLine({
-        price: p.entry_price,
-        color: token("--accent"),
-        lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Solid,
-        axisLabelVisible: true,
-        title: `entry ${p.side}`,
-      })
-    );
+    tags.push({
+      price: p.entry_price,
+      priceText: fmtPrice(p.entry_price),
+      label: p.side, // LONG / SHORT
+      color: p.side === "LONG" ? BULL_COLOR : BEAR_COLOR,
+      kind: "entry",
+    });
   }
 
   // A ladder bot can rest dozens of orders; drawing them all turns the
@@ -198,24 +201,17 @@ function renderPriceLines(venue) {
       list = list.slice().sort((a, b) => Math.abs(a.price - mid) - Math.abs(b.price - mid));
     }
     for (const q of list.slice(0, MAX_QUOTE_LINES_PER_SIDE)) {
-      priceLines.push(
-        candleSeries.createPriceLine({
-          price: q.price,
-          color: side === "buy" ? BULL_COLOR : BEAR_COLOR,
-          lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dashed,
-          // Same as a CEX order line: the price sits in a chip on the axis,
-          // and the line itself carries side, size and price. Without the
-          // axis chip you can see that an order rests somewhere but have to
-          // eyeball its level against the scale.
-          axisLabelVisible: true,
-          title: q.size
-            ? `${side} ${fmt(q.size, 3)} @ ${fmtPrice(q.price)}`
-            : `${side} @ ${fmtPrice(q.price)}`,
-        })
-      );
+      tags.push({
+        price: q.price,
+        priceText: fmtPrice(q.price),
+        label: q.size ? `${side} ${fmt(q.size, 3)}` : side,
+        color: side === "buy" ? BULL_COLOR : BEAR_COLOR,
+        kind: "order",
+      });
     }
   }
+
+  priceTags.setTags(tags);
 }
 
 function addFillMarkers(fills, intervalS) {
@@ -326,8 +322,7 @@ function resetChartState() {
   candleSeries.setData([]);
   lastCandleSig = "";
   lastLineSig = "";
-  for (const line of priceLines) candleSeries.removePriceLine(line);
-  priceLines = [];
+  priceTags.setTags([]);
 }
 
 function botStateClass(ageS) {

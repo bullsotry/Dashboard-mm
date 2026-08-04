@@ -152,7 +152,7 @@
   /* When the data is not live, desaturate every panel that displays it. The
      badge alone is too easy to miss when you glance at a screen; this makes
      stale data *look* wrong at a distance. The chart keeps its colours —
-     candles are venue history and stay true regardless of the bot. */
+     candles are venue history and stay true regardless of the bot.
      The bot list is deliberately exempt: when the selected bot is dead, that
      list is the thing you need to read in order to switch to a live one. */
   body.stale #side > .panel:not(#bots-panel) {
@@ -298,6 +298,7 @@
 
 <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
 <script src="/static/fill_markers.js"></script>
+<script src="/static/price_tags.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
