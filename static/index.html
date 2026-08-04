@@ -20,8 +20,8 @@
     --panel-bg: #000000;
     --panel-border: #3d424a;
     --panel-radius: 0px;
-    --panel-pad-y: 12px;
-    --panel-pad-x: 14px;
+    --panel-pad-y: 9px;
+    --panel-pad-x: 11px;
     --gap: 10px;
 
     --text: #e8eaec;
@@ -54,11 +54,14 @@
     background: var(--page-bg);
     color: var(--text);
   }
-  body { display: flex; flex-direction: column; }
+  /* The app owns the viewport; the side rail scrolls itself. See #side. */
+  body { display: flex; flex-direction: column; overflow: hidden; }
 
   #layout {
     display: grid;
-    grid-template-columns: 1fr 300px;
+    /* The chart is the content; the rail is support. Narrower than it was,
+       so the chart gets the width back. */
+    grid-template-columns: minmax(0, 1fr) 250px;
     gap: var(--gap);
     padding: var(--gap);
     flex: 1 1 auto;
@@ -87,8 +90,8 @@
        wrapper element in the markup. */
     background: var(--title-bar-bg);
     border-bottom: 1px solid var(--panel-border);
-    margin: calc(var(--panel-pad-y) * -1) calc(var(--panel-pad-x) * -1) 10px;
-    padding: 7px var(--panel-pad-x);
+    margin: calc(var(--panel-pad-y) * -1) calc(var(--panel-pad-x) * -1) 8px;
+    padding: 5px var(--panel-pad-x);
   }
 
   .panel h2 button {
@@ -159,7 +162,10 @@
     opacity: 0.45; filter: grayscale(0.7); transition: opacity 0.2s, filter 0.2s;
   }
 
-  #chart-wrap { position: relative; flex: 1 1 auto; min-height: 420px; }
+  /* Was 420px, which is taller than the whole viewport once the browser is
+     zoomed in a couple of steps. A floor that tall forces the grid past the
+     viewport and takes the side rail down with it. */
+  #chart-wrap { position: relative; flex: 1 1 auto; min-height: 200px; }
   #chart { width: 100%; height: 100%; }
   #chart-label {
     position: absolute; top: 8px; left: 12px; z-index: 5;
@@ -168,22 +174,37 @@
   }
   #chart-label b { color: var(--text); font-weight: 600; }
 
-  #side { display: flex; flex-direction: column; gap: var(--gap); min-height: 0; }
+  /* Browser zoom shrinks the viewport in CSS pixels, so the rail's content
+     stops fitting. Previously it was simply clipped: the order book — last
+     in the stack — vanished with no way to reach it, and the panel above it
+     was cut mid-sentence. The rail scrolls itself now, so zooming changes
+     how much is visible, never whether it exists.
+     `flex-shrink: 0` on the panels stops them being squashed into
+     illegibility instead of scrolling. */
+  #side {
+    display: flex; flex-direction: column; gap: var(--gap);
+    min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    scrollbar-width: thin; scrollbar-color: var(--panel-border) transparent;
+  }
+  #side > .panel { flex: 0 0 auto; }
+  #side::-webkit-scrollbar { width: 7px; }
+  #side::-webkit-scrollbar-track { background: transparent; }
+  #side::-webkit-scrollbar-thumb { background: var(--panel-border); border-radius: 4px; }
 
-  .row { display: flex; justify-content: space-between; align-items: baseline; font-size: 12.5px; padding: 3px 0; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; padding: 1.5px 0; }
   .row .label { color: var(--text-dim); }
   .row .val { font-family: ui-monospace, Menlo, monospace; color: var(--text); }
-  .pos-group { padding: 6px 0; }
+  .pos-group { padding: 3px 0; }
   .pos-group + .pos-group { border-top: 1px solid var(--divider); margin-top: 4px; }
   .pos-side-label {
     font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
-    padding: 1px 6px; border-radius: var(--btn-radius); display: inline-block; margin-bottom: 4px;
+    padding: 0 5px; border-radius: var(--btn-radius); display: inline-block; margin-bottom: 2px;
   }
   .pos-side-label.long { color: var(--bull); background: rgba(14, 203, 129, 0.14); }
   .pos-side-label.short { color: var(--bear); background: rgba(250, 82, 82, 0.14); }
   .pnl-pos { color: var(--bull); }
   .pnl-neg { color: var(--bear); }
-  .account-block { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--divider); }
+  .account-block { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--divider); }
   .empty-note { color: var(--text-faint); font-size: 12px; font-style: italic; }
 
   /* Every figure in the stats panel is computed over a bounded fills
@@ -198,8 +219,8 @@
      indistinguishable from a bot that never existed. */
   .bot-row {
     display: flex; align-items: center; gap: 7px;
-    padding: 5px 6px; margin: 0 -6px;
-    cursor: pointer; font-size: 12.5px;
+    padding: 3px 6px; margin: 0 -6px;
+    cursor: pointer; font-size: 12px;
     border-left: 2px solid transparent;
   }
   .bot-row:hover { background: var(--btn-bg-active); }
@@ -228,14 +249,14 @@
   #book-panel.visible { display: block; }
   .book-header {
     display: flex; justify-content: space-between;
-    font-size: 10px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
-    padding: 0 0 4px 0;
+    font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 0 0 2px 0;
   }
-  .book-side { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .book-side { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
   .book-row {
     position: relative;
     display: flex; justify-content: space-between;
-    padding: 2px 4px;
+    padding: 0.5px 4px;
     border-radius: var(--btn-radius);
   }
   .book-row .depth-bar {
@@ -248,17 +269,21 @@
   .book-row.bid { color: var(--bull); }
   .book-row.bid .depth-bar { background: rgba(14, 203, 129, 0.16); }
   .spread-line {
-    text-align: center; font-size: 11px; color: var(--text-dim);
-    padding: 6px 0; border-top: 1px solid var(--divider); border-bottom: 1px solid var(--divider);
-    margin: 4px 0 6px 0;
+    text-align: center; font-size: 10.5px; color: var(--text-dim);
+    padding: 3px 0; border-top: 1px solid var(--divider); border-bottom: 1px solid var(--divider);
+    margin: 3px 0 4px 0;
   }
 
   /* Below ~900px the fixed 300px rail leaves the chart unusably narrow, so
      the panels stack under it instead of beside it. */
   @media (max-width: 900px) {
     #layout { grid-template-columns: 1fr; }
-    #chart-wrap { min-height: 320px; }
+    #chart-wrap { min-height: 260px; }
     #status .detail { display: none; }
+    /* Stacked, the rail is no longer a fixed-height column, so it must not
+       trap a scrollbar of its own — the page scrolls instead. */
+    body { overflow: auto; }
+    #side { overflow-y: visible; }
   }
 </style>
 </head>
@@ -281,6 +306,16 @@
       <div id="bots-body"><div class="empty-note">scanning…</div></div>
     </div>
 
+    <div class="panel">
+      <h2>Order Book <button id="book-toggle">hide</button></h2>
+      <div id="book-panel" class="visible">
+        <div class="book-header"><span>Price</span><span>Size</span></div>
+        <div class="book-side" id="book-asks"></div>
+        <div class="spread-line" id="book-spread">—</div>
+        <div class="book-side" id="book-bids"></div>
+      </div>
+    </div>
+
     <div class="panel" id="position-panel">
       <h2>Position &amp; Margin</h2>
       <div id="position-body"><div class="row"><span class="label">loading…</span></div></div>
@@ -291,15 +326,6 @@
       <div id="stats-body"><div class="empty-note">no fills yet</div></div>
     </div>
 
-    <div class="panel">
-      <h2>Order Book <button id="book-toggle">show</button></h2>
-      <div id="book-panel">
-        <div class="book-header"><span>Price</span><span>Size</span></div>
-        <div class="book-side" id="book-asks"></div>
-        <div class="spread-line" id="book-spread">—</div>
-        <div class="book-side" id="book-bids"></div>
-      </div>
-    </div>
   </div>
 </div>
 

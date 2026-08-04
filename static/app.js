@@ -452,7 +452,8 @@ function renderBook(ob) {
     spreadEl.textContent = "—";
     return;
   }
-  const depth = 12;
+  // Compact on purpose — the rail is support, the chart is the content.
+  const depth = 7;
   const asks = ob.asks.slice(0, depth).reverse();
   const bids = ob.bids.slice(0, depth);
   const maxSize = Math.max(1e-9, ...asks.map((l) => l.size), ...bids.map((l) => l.size));
@@ -468,7 +469,9 @@ function renderBook(ob) {
 
 const bookPanel = document.getElementById("book-panel");
 const bookToggle = document.getElementById("book-toggle");
-let bookVisible = false;
+// Visible by default: it sits high in the rail now and is meant to be
+// read at a glance, not opened on demand.
+let bookVisible = true;
 let lastOrderbook = null;
 bookToggle.addEventListener("click", () => {
   bookVisible = !bookVisible;
