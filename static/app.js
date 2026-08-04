@@ -122,7 +122,7 @@ function updateChartLabel() {
   let live = "";
   if (lastOrderbook && lastOrderbook.mid > 0) {
     const bps = ((lastOrderbook.best_ask - lastOrderbook.best_bid) / lastOrderbook.mid) * 10000;
-    live = ` &middot; mid <b>${fmt(lastOrderbook.mid, 2)}</b> &middot; ${fmt(bps, 1)} bps`;
+    live = ` &middot; mid <b>${fmtPrice(lastOrderbook.mid)}</b> &middot; ${fmt(bps, 1)} bps`;
   }
   document.getElementById("chart-label").innerHTML =
     `<b>${currentSymbol || "—"}</b> &middot; ${currentInterval}${live}`;
@@ -204,8 +204,14 @@ function renderPriceLines(venue) {
           color: side === "buy" ? BULL_COLOR : BEAR_COLOR,
           lineWidth: 1,
           lineStyle: LightweightCharts.LineStyle.Dashed,
-          axisLabelVisible: false,
-          title: q.size ? `${side} ${fmt(q.size, 3)}` : side,
+          // Same as a CEX order line: the price sits in a chip on the axis,
+          // and the line itself carries side, size and price. Without the
+          // axis chip you can see that an order rests somewhere but have to
+          // eyeball its level against the scale.
+          axisLabelVisible: true,
+          title: q.size
+            ? `${side} ${fmt(q.size, 3)} @ ${fmtPrice(q.price)}`
+            : `${side} @ ${fmtPrice(q.price)}`,
         })
       );
     }
@@ -236,6 +242,38 @@ function fmt(n, digits = 4) {
   return Number(n).toFixed(digits);
 }
 
+// Price precision has to follow the instrument, not a constant. Now that any
+// discovered bot can appear, a hard-coded 2 decimals renders a 0.0042 asset
+// as "0.00" — every price on screen identical and every spread zero.
+//
+// The instrument's own book is the authority: the number of decimals the
+// venue quotes in *is* its tick precision. Guessing from magnitude instead
+// would print SOL at 73.68 as "73.680", padding a digit the venue does not
+// have. The magnitude rule stays only as a fallback for the first frames,
+// before any book has arrived.
+let symbolDecimals = null;
+
+function decimalsOf(v) {
+  const s = String(v);
+  const dot = s.indexOf(".");
+  return dot < 0 ? 0 : s.length - dot - 1;
+}
+
+function updatePriceDecimals(ob) {
+  if (!ob || !ob.bids || !ob.bids.length) return;
+  let d = 0;
+  for (const l of ob.bids.slice(0, 20)) d = Math.max(d, decimalsOf(l.price));
+  for (const l of ob.asks.slice(0, 20)) d = Math.max(d, decimalsOf(l.price));
+  symbolDecimals = d;
+}
+
+function fmtPrice(p) {
+  if (p === null || p === undefined) return "—";
+  if (symbolDecimals !== null) return Number(p).toFixed(symbolDecimals);
+  const v = Math.abs(Number(p) || 0);
+  return Number(p).toFixed(v >= 1 ? 2 : v >= 0.01 ? 5 : 7);
+}
+
 function renderPosition(venue) {
   const body = document.getElementById("position-body");
   const rows = [];
@@ -247,7 +285,7 @@ function renderPosition(venue) {
       <div class="pos-group">
         <span class="pos-side-label ${sideCls}">${p.side}</span>
         <div class="row"><span class="label">qty</span><span class="val">${fmt(p.qty_base, 3)}</span></div>
-        <div class="row"><span class="label">entry</span><span class="val">${fmt(p.entry_price, 2)}</span></div>
+        <div class="row"><span class="label">entry</span><span class="val">${fmtPrice(p.entry_price)}</span></div>
         <div class="row"><span class="label">uPnL</span><span class="val ${pnlCls}">${fmt(p.unrealised_pnl, 4)}</span></div>
       </div>
     `);
@@ -281,6 +319,7 @@ let currentBotKey = null;
 let lastBotsSig = "";
 
 function resetChartState() {
+  symbolDecimals = null; // a new instrument has a different tick
   seenFillTimes = new Set();
   fillBuckets = new Map();
   fillMarkers.setMarkers([]);
@@ -403,12 +442,12 @@ function renderBook(ob) {
   const maxSize = Math.max(1e-9, ...asks.map((l) => l.size), ...bids.map((l) => l.size));
   const bookRow = (l, side) => {
     const pct = Math.min(100, (l.size / maxSize) * 100);
-    return `<div class="book-row ${side}"><div class="depth-bar" style="width:${pct}%"></div><span>${fmt(l.price, 2)}</span><span>${fmt(l.size, 3)}</span></div>`;
+    return `<div class="book-row ${side}"><div class="depth-bar" style="width:${pct}%"></div><span>${fmtPrice(l.price)}</span><span>${fmt(l.size, 3)}</span></div>`;
   };
   asksEl.innerHTML = asks.map((l) => bookRow(l, "ask")).join("");
   bidsEl.innerHTML = bids.map((l) => bookRow(l, "bid")).join("");
   const spreadBps = ob.mid > 0 ? ((ob.best_ask - ob.best_bid) / ob.mid) * 10000 : 0;
-  spreadEl.textContent = `spread ${fmt(ob.best_ask - ob.best_bid, 4)} (${fmt(spreadBps, 1)} bps)`;
+  spreadEl.textContent = `spread ${fmtPrice(ob.best_ask - ob.best_bid)} (${fmt(spreadBps, 1)} bps)`;
 }
 
 const bookPanel = document.getElementById("book-panel");
@@ -503,6 +542,7 @@ async function poll() {
     if (venue) {
       currentSymbol = venue.symbol || "";
       lastOrderbook = venue.orderbook || null;
+      updatePriceDecimals(lastOrderbook);
       renderTimeframeBar();
       updateChartLabel();
       renderCandles(venue.klines);
