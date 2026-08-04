@@ -193,6 +193,19 @@ class BotStateAdapter:
         )
         return compute_stats(list(self._fills), net_position_base=net, hedge_mode=hedge)
 
+    def get_first_fill_ts(self) -> float | None:
+        """When the bot's recorded activity starts, as far as this window
+        knows. Used to decide how much chart history to pull: an operator
+        wants to see the session, not a fixed number of bars.
+
+        It is the start of the *window*, not of the bot's life — the ledger
+        is capped — so the chart reaches back as far as the fills do and no
+        further, which is the honest boundary anyway."""
+        self._poll_fills()
+        if not self._fills:
+            return None
+        return min(f["ts"] for f in self._fills)
+
     def get_recent_fills(self, limit: int = 500) -> list[Fill]:
         self._poll_fills()
         return list(self._fills)[-limit:]

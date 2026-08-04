@@ -138,17 +138,43 @@ let currentSymbol = "";
 // and doing it under the user's cursor is what makes a chart fight back
 // while you pan through history. A cheap signature skips the no-op case.
 let lastCandleSig = "";
+let lastBarsMeta = null;
 
 function renderCandles(klines) {
-  if (!klines || klines.length === 0) return;
+  // null means the server confirmed our history is current and sent none.
+  if (klines === null || klines === undefined || klines.length === 0) return;
   const last = klines[klines.length - 1];
   const sig = `${klines.length}|${klines[0].time}|${last.time}|${last.close}|${last.high}|${last.low}`;
   if (sig === lastCandleSig) return;
   lastCandleSig = sig;
 
-  candleSeries.setData(
-    klines.map((k) => ({ time: k.time, open: k.open, high: k.high, low: k.low, close: k.close }))
-  );
+  // Now that history runs to thousands of bars, replacing the whole series
+  // to move one candle is the wrong tool: update() mutates in place.
+  //
+  // Measured, not assumed: setData does NOT reset the viewport — with the
+  // range held at logical 239..412, setData returned it unchanged. So this
+  // is a cost argument, not a scroll-position one. The viewport does shift
+  // when deeper pagination prepends bars, because logical indices are
+  // positional, but that settles once the history has filled in.
+  const bar = (k) => ({ time: k.time, open: k.open, high: k.high, low: k.low, close: k.close });
+  const meta = { len: klines.length, first: klines[0].time, last: last.time };
+  const sameTail = lastBarsMeta && lastBarsMeta.first === meta.first;
+  const inPlace = sameTail && meta.len === lastBarsMeta.len && meta.last === lastBarsMeta.last;
+  const appended = sameTail && meta.len === lastBarsMeta.len + 1 && meta.last > lastBarsMeta.last;
+
+  if (inPlace) {
+    candleSeries.update(bar(last));
+  } else if (appended) {
+    // Finalise the bar that just closed before adding the new one; update()
+    // requires non-decreasing times, so the older one has to go first.
+    candleSeries.update(bar(klines[klines.length - 2]));
+    candleSeries.update(bar(last));
+  } else {
+    // History changed shape — deeper pagination arrived, or the bot or
+    // interval changed. A full reset is correct here.
+    candleSeries.setData(klines.map(bar));
+  }
+  lastBarsMeta = meta;
   // Markers anchor to their candle's high/low, so the primitive needs the
   // bars keyed by time.
   fillMarkers.setCandles(new Map(klines.map((k) => [k.time, { high: k.high, low: k.low }])));
@@ -543,6 +569,9 @@ async function poll() {
   try {
     let url = `/snapshot?interval=${encodeURIComponent(currentInterval)}`;
     if (currentBotKey) url += `&bot=${encodeURIComponent(currentBotKey)}`;
+    // Tell the server which history we already hold so it can answer
+    // "unchanged" instead of resending thousands of identical candles.
+    if (lastCandleSig) url += `&ksig=${encodeURIComponent(lastCandleSig)}`;
     const resp = await fetch(url, { cache: "no-store" });
     if (!resp.ok) throw new Error(`http ${resp.status}`);
     const data = await resp.json();

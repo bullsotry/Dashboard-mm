@@ -108,8 +108,26 @@ def bots() -> dict:
     return {"server_ts": time.time(), "bots": out}
 
 
+def _klines_sig(candles: list) -> str:
+    """Cheap identity for a candle list. Only the newest bar mutates in place
+    (the one still forming), so its OHLC plus the list bounds is enough to
+    tell "same history" from "something moved"."""
+    if not candles:
+        return "0"
+    last = candles[-1]
+    return f'{len(candles)}|{candles[0]["time"]}|{last["time"]}|{last["close"]}|{last["high"]}|{last["low"]}'
+
+
 @app.get("/snapshot")
-def snapshot(bot: str | None = None, interval: str = DEFAULT_INTERVAL) -> dict:
+def snapshot(
+    bot: str | None = None,
+    interval: str = DEFAULT_INTERVAL,
+    ksig: str | None = None,
+) -> dict:
+    """`ksig` is the candle signature the caller already holds. Deep history
+    made the candles ~82% of every response while changing at most once per
+    kline poll, so an unchanged history is answered with its signature alone
+    instead of thousands of identical rows."""
     # Validated here, at the boundary, before it reaches an external API call.
     if interval not in SUPPORTED_INTERVALS:
         interval = DEFAULT_INTERVAL
@@ -130,6 +148,17 @@ def snapshot(bot: str | None = None, interval: str = DEFAULT_INTERVAL) -> dict:
     kline_adapter = _kline_adapters.get(bot)
     account_adapter = _account_adapters.get(bot)
 
+    klines = (
+        kline_adapter.get_klines(interval, since_ts=state.get_first_fill_ts())
+        if kline_adapter
+        else []
+    )
+    klines_sig = _klines_sig(klines)
+    # None means "unchanged, keep what you have" — distinct from [], which
+    # means this bot genuinely has no candles.
+    if ksig is not None and ksig == klines_sig:
+        klines = None
+
     venue = {
         "key": bot,
         "exchange": found[bot].exchange,
@@ -145,7 +174,8 @@ def snapshot(bot: str | None = None, interval: str = DEFAULT_INTERVAL) -> dict:
         # must be able to tell those two apart.
         "source_ts": state.get_source_ts(),
         "account": account_adapter.get_account() if account_adapter else None,
-        "klines": kline_adapter.get_klines(interval) if kline_adapter else [],
+        "klines": klines,
+        "klines_sig": klines_sig,
         "kline_interval": interval,
         "kline_interval_s": interval_seconds(interval),
         "supported_intervals": SUPPORTED_INTERVALS if kline_adapter else [],
