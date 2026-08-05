@@ -86,6 +86,16 @@ def _parse_rows(payload) -> list[Candle]:
 
 
 class BitunixKlineAdapter:
+    # Read by the server instead of importing this module's constants, so a
+    # second venue with a different granularity set doesn't get validated
+    # against Bitunix's list.
+    supported_intervals = SUPPORTED_INTERVALS
+    default_interval = DEFAULT_INTERVAL
+
+    @staticmethod
+    def interval_seconds(interval: str) -> int:
+        return interval_seconds(interval)
+
     def __init__(self, symbol: str, limit: int = _PAGE_ROWS, poll_interval_s: float = 20.0):
         self._symbol = symbol
         self._limit = min(limit, _PAGE_ROWS)

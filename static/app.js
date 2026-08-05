@@ -83,21 +83,36 @@ let fillBuckets = new Map(); // `${bucketTime}_${side}` -> {time, side}
 let candleIntervalS = 60;
 
 // --- Timeframe selection ---
-// The backend is the only thing that talks to Bitunix (its kline endpoint
-// sends no CORS header, so the browser couldn't call it directly even if
-// we wanted to) and it validates against the same whitelist server-side —
-// this list is just for building the buttons.
-const SUPPORTED_INTERVALS = ["1m", "3m", "10m", "15m", "30m", "1h", "2h", "6h"];
+// The buttons are whatever the *selected venue* reports it can serve, not a
+// list hardcoded here: granularities differ per exchange (Bitunix has 3m and
+// 10m, Coinbase has 5m and 1d), and a button for an interval the venue does
+// not have would silently redraw the previous one. The backend, which is the
+// only thing that talks to the exchanges (their kline endpoints send no CORS
+// header), validates the same list server-side.
+let supportedIntervals = [];
 let currentInterval = "1m";
-let intervalsRendered = false;
+let tfListenerBound = false;
 
-function renderTimeframeBar() {
-  if (intervalsRendered) return;
-  intervalsRendered = true;
+function renderTimeframeBar(venue) {
+  const intervals = (venue && venue.supported_intervals) || [];
+  // The server answers with the interval it actually served, which is how a
+  // venue-unsupported request (just switched bots) gets corrected here.
+  if (venue && venue.kline_interval) currentInterval = venue.kline_interval;
+
   const bar = document.getElementById("tf-buttons");
-  bar.innerHTML = SUPPORTED_INTERVALS.map(
-    (iv) => `<button class="tf-btn${iv === currentInterval ? " active" : ""}" data-interval="${iv}">${iv}</button>`
-  ).join("");
+  const sig = intervals.join(",") + "|" + currentInterval;
+  if (sig !== renderTimeframeBar._sig) {
+    renderTimeframeBar._sig = sig;
+    supportedIntervals = intervals;
+    bar.innerHTML = intervals
+      .map(
+        (iv) =>
+          `<button class="tf-btn${iv === currentInterval ? " active" : ""}" data-interval="${iv}">${iv}</button>`
+      )
+      .join("");
+  }
+  if (tfListenerBound) return;
+  tfListenerBound = true;
   bar.addEventListener("click", (e) => {
     const btn = e.target.closest(".tf-btn");
     if (!btn || btn.dataset.interval === currentInterval) return;
@@ -468,6 +483,39 @@ function renderStats(stats) {
   `;
 }
 
+// A bot past the dead threshold keeps its name and its age, and loses every
+// number. The alternative — greying the last values out — still leaves a
+// figure on screen to be read and believed, and a four-day-old position read
+// as current is worse than no reading at all. Same reasoning as the
+// unavailable-PnL block in renderStats: refuse to print, say why.
+function renderDeadBot(ageS) {
+  // Chart overlays are the bot's own marks; they go with the numbers.
+  seenFillTimes = new Set();
+  fillBuckets = new Map();
+  fillMarkers.setMarkers([]);
+  lastLineSig = "";
+  priceTags.setTags([]);
+
+  const dash = (label) =>
+    `<div class="row"><span class="label">${label}</span><span class="val">—</span></div>`;
+  const stopped = `<div class="empty-note">stopped ${fmtDuration(ageS)} ago</div>`;
+
+  document.getElementById("position-body").innerHTML =
+    dash("qty") + dash("entry") + dash("uPnL") +
+    `<div class="account-block">` +
+    dash("available") + dash("margin used") + dash("cross uPnL") +
+    `</div>` + stopped;
+
+  document.getElementById("stats-window").textContent = "—";
+  document.getElementById("stats-body").innerHTML =
+    dash("fills") + dash("rate") + dash("volume") +
+    dash("fees paid") + dash("capture") +
+    `<div class="row stat-net"><span class="label">realised net</span><span class="val">—</span></div>` +
+    stopped;
+
+  renderBook(null);
+}
+
 function renderBook(ob) {
   const asksEl = document.getElementById("book-asks");
   const bidsEl = document.getElementById("book-bids");
@@ -530,6 +578,12 @@ function renderStatus() {
   const botAgeS = currentBotAgeS();
   let cls, text, detail;
 
+  // Whether the panels still hold numbers that need a warning. A dead bot has
+  // had every figure replaced by a dash already, so it needs none; a dead
+  // *link* has blanked nothing, because the poll that would have blanked it is
+  // the thing that failed — its stale numbers are exactly the dangerous case.
+  let numbersOnScreen = true;
+
   if (!everConnected) {
     cls = "";
     text = "connecting";
@@ -547,6 +601,7 @@ function renderStatus() {
     cls = "dead";
     text = "bot dead";
     detail = fmtDuration(botAgeS);
+    numbersOnScreen = false; // renderDeadBot dashed them all out
   } else if (botAgeS * 1000 > BOT_STALE_MS) {
     cls = "warn";
     text = "bot stale";
@@ -560,9 +615,14 @@ function renderStatus() {
   statusEl.className = cls;
   statusTextEl.textContent = text;
   statusDetailEl.textContent = detail;
-  // Desaturate the data panels on anything but a clean live state, so stale
-  // numbers cannot be misread as current from across the room.
-  document.body.classList.toggle("stale", cls === "warn" || cls === "dead");
+  // Desaturate only while doubtful numbers are actually on screen, so they
+  // cannot be misread as current from across the room. Greying panels that
+  // already read "—" would make the dashboard look broken rather than make
+  // the bot look stopped.
+  document.body.classList.toggle(
+    "stale",
+    numbersOnScreen && (cls === "warn" || cls === "dead")
+  );
 }
 
 async function poll() {
@@ -589,22 +649,38 @@ async function poll() {
     const venue = data.venue;
     if (venue) {
       currentSymbol = venue.symbol || "";
-      lastOrderbook = venue.orderbook || null;
-      updatePriceDecimals(lastOrderbook);
-      renderTimeframeBar();
-      updateChartLabel();
-      renderCandles(venue.klines);
-      addFillMarkers(venue.fills || [], venue.kline_interval_s);
-      renderPriceLines(venue);
-      renderPosition(venue);
-      renderStats(venue.stats);
-      renderBook(bookVisible ? lastOrderbook : null);
 
+      // Age is resolved *before* anything is drawn: what a bot asserts about
+      // its position, PnL and book is only worth rendering while the bot is
+      // still alive to assert it. A stopped bot's last words are not a
+      // reading of the market, they are a fossil of the moment it died.
       if (data.server_ts && venue.source_ts) {
         botAgeAtPollS = Math.max(0, data.server_ts - venue.source_ts);
         botAgeMeasuredAt = Date.now();
       } else {
         botAgeAtPollS = null;
+      }
+      const dead = botAgeAtPollS !== null && botAgeAtPollS * 1000 > BOT_DEAD_MS;
+
+      // The book is published by the bot, so it dies with it. Dropping it
+      // here also clears the mid out of the chart label, which would
+      // otherwise keep quoting a days-old price next to a live symbol name.
+      lastOrderbook = dead ? null : venue.orderbook || null;
+      updatePriceDecimals(lastOrderbook);
+      renderTimeframeBar(venue);
+      updateChartLabel();
+      // Candles are venue market data, not the bot's claim, so they stay
+      // true after the bot stops and are still worth showing.
+      renderCandles(venue.klines);
+
+      if (dead) {
+        renderDeadBot(botAgeAtPollS);
+      } else {
+        addFillMarkers(venue.fills || [], venue.kline_interval_s);
+        renderPriceLines(venue);
+        renderPosition(venue);
+        renderStats(venue.stats);
+        renderBook(bookVisible ? lastOrderbook : null);
       }
     } else {
       // Nothing discovered at all. The link is healthy, so say so rather

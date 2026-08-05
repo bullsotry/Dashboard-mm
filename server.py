@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import config
-from adapters.bitunix_klines import DEFAULT_INTERVAL, SUPPORTED_INTERVALS, interval_seconds
+from adapters.bitunix_klines import DEFAULT_INTERVAL
 from adapters.bot_files import BotStateAdapter
 from adapters.discovery import DiscoveredBot, discover
 
@@ -128,10 +128,6 @@ def snapshot(
     made the candles ~82% of every response while changing at most once per
     kline poll, so an unchanged history is answered with its signature alone
     instead of thousands of identical rows."""
-    # Validated here, at the boundary, before it reaches an external API call.
-    if interval not in SUPPORTED_INTERVALS:
-        interval = DEFAULT_INTERVAL
-
     found = _refresh()
     if not found:
         return {"server_ts": time.time(), "bot": None, "bots": [], "venue": None}
@@ -147,6 +143,16 @@ def snapshot(
     state = _state_adapters[bot]
     kline_adapter = _kline_adapters.get(bot)
     account_adapter = _account_adapters.get(bot)
+
+    # Validated against *this* venue's granularities, before it reaches an
+    # external API call. Venues don't offer the same set — Bitunix has 3m
+    # and 10m, Coinbase has 5m and 1d — so a global whitelist would either
+    # reject an interval the venue supports or forward one it doesn't. When
+    # the client asks for an interval this venue lacks (it just switched
+    # bots), fall back to the venue's own default rather than erroring.
+    supported = list(getattr(kline_adapter, "supported_intervals", [])) if kline_adapter else []
+    if kline_adapter and interval not in supported:
+        interval = kline_adapter.default_interval
 
     klines = (
         kline_adapter.get_klines(interval, since_ts=state.get_first_fill_ts())
@@ -177,8 +183,8 @@ def snapshot(
         "klines": klines,
         "klines_sig": klines_sig,
         "kline_interval": interval,
-        "kline_interval_s": interval_seconds(interval),
-        "supported_intervals": SUPPORTED_INTERVALS if kline_adapter else [],
+        "kline_interval_s": kline_adapter.interval_seconds(interval) if kline_adapter else 60,
+        "supported_intervals": supported,
     }
 
     bot_list = [
