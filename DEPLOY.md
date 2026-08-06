@@ -11,10 +11,18 @@ exists, 135 G free.
 
 | Source | Access | Why root is required |
 |---|---|---|
-| `/root/bots/v17mm/bitunix_mm/.v15mm_hl_viz.json` | file read, ~1 s | mode `600 root:root` |
+| `/root/bots/*/*/.*viz*.json` (whatever `VIZ_GLOBS` matches) | file read, ~1 s | mode `600 root:root` |
 | `/root/.v17mm_tracker/fills.jsonl` | file read (tail), ~1 s | `/root` itself is mode `700` |
 | Bitunix REST `/api/v1/futures/account` | signed HTTPS, 5 s | dashboard's own read-only key |
 | Bitunix REST `/api/v1/futures/market/kline` | public HTTPS, 20 s | no key |
+| OKX REST `/api/v5/account/balance` | signed HTTPS, 5 s, IPv4-forced | dashboard's own read-only key |
+| OKX REST `/api/v5/public/instruments`, `/api/v5/market/candles` | public HTTPS, 20 s | no key |
+| Coinbase Advanced Trade `get_accounts` (via SDK) | signed HTTPS, 5 s | dashboard's own key or key file |
+| Coinbase REST `/api/v3/brokerage/market/.../candles` | public HTTPS, 20 s | no key |
+
+Every credential-gated row is optional — see `.env.example`. A venue with no
+key configured just shows no margin panel for its bots; discovery, book,
+positions, fills and candles are unaffected.
 
 `User=root` is needed because the bot's viz file is `600 root:root` and `/root`
 is `700`. The alternatives were changing permissions on the bot's files (you
@@ -47,11 +55,13 @@ ssh "$VPS" 'mkdir -p /root/dashboard-mm'
 tar czf - \
   server.py config.py requirements.txt \
   adapters/__init__.py adapters/base.py adapters/stats.py \
-  adapters/discovery.py adapters/bot_files.py \
+  adapters/discovery.py adapters/bot_files.py adapters/basis.py \
   adapters/bitunix_account.py adapters/bitunix_klines.py \
+  adapters/coinbase_account.py adapters/coinbase_klines.py \
+  adapters/okx_account.py adapters/okx_klines.py \
   static/index.html static/app.js static/fill_markers.js \
   static/vendor/lightweight-charts.standalone.production.js \
-  tests/test_stats.py \
+  tests/test_stats.py tests/test_basis.py \
   deploy/dashboard-mm.service \
 | ssh "$VPS" 'tar xzf - -C /root/dashboard-mm'
 ```
@@ -77,7 +87,7 @@ ssh "$VPS" '
   python3 -m venv venv &&
   venv/bin/pip install --quiet --upgrade pip &&
   venv/bin/pip install --quiet -r requirements.txt &&
-  venv/bin/python -c "import fastapi, uvicorn, requests; print(\"deps ok\")"
+  venv/bin/python -c "import fastapi, uvicorn, requests, coinbase; print(\"deps ok\")"
 '
 ```
 
@@ -97,14 +107,21 @@ umask 077
 cat > /root/dashboard-mm/.env <<'EOF'
 BITUNIX_API_KEY=<your read-only key>
 BITUNIX_SECRET_KEY=<your read-only secret>
+OKX_API_KEY=<your read-only key>
+OKX_SECRET_KEY=<your read-only secret>
+OKX_PASSPHRASE=<the passphrase chosen when the OKX key was created>
+COINBASE_KEY_FILE=<path to a CDP key file, e.g. the bot's own>
 EOF
 chmod 600 /root/dashboard-mm/.env
 ```
 
-The key must have trade/withdraw unchecked. This step is genuinely optional:
-the unit declares the env file with a leading `-`, so a missing `.env` is not
-a startup failure. Skip it and the dashboard runs with the margin panel
-showing "account margin unavailable"; everything else is unaffected.
+Every venue's block is independent — include only the ones you want a
+margin panel for. Keys must have trade/withdraw unchecked. This step is
+genuinely optional: the unit declares the env file with a leading `-`, so a
+missing `.env` is not a startup failure. Skip a venue (or all of them) and
+its bots' dashboard rows just show "account margin unavailable"; chart,
+fills, positions and order book are unaffected either way. See
+`.env.example` for the full set of recognised variables.
 
 ## Step 4 — smoke test before installing the service
 

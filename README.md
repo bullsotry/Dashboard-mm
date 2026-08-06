@@ -1,12 +1,14 @@
 # Dashboard MM
 
-Real-time, **read-only** monitoring dashboard for a Bitunix market-making bot.
+Real-time, **read-only** monitoring dashboard for the v17mm market-making
+fleet — Bitunix, Coinbase and OKX legs, whichever of them are running.
 
-It renders a candlestick chart (real Bitunix klines) with buy/sell fill
-markers, the bot's own resting quotes and entry prices drawn as price lines,
-a position & margin panel, a performance panel, and a toggleable order book.
-The backend is a single FastAPI route (`/snapshot`) that the frontend polls;
-everything else is a static file.
+It renders a candlestick chart (real klines from whichever venue the
+selected bot trades on) with buy/sell fill markers, the bot's own resting
+quotes and entry prices drawn as price lines, a position & margin panel, a
+performance panel, and a toggleable order book. The backend is a single
+FastAPI route (`/snapshot`) that the frontend polls; everything else is a
+static file.
 
 ## Freshness is a first-class signal
 
@@ -38,6 +40,11 @@ wrong from across the room rather than requiring you to read a small badge.
   rather than silently vanishing. Adding a venue means adding market-data
   adapters for it; a bot on an unsupported exchange still shows its book,
   position, quotes and performance, just without candles.
+- **Per-venue adapters, one contract.** Klines and account/margin are each
+  behind the same shape (`get_klines`, `get_account`) regardless of venue —
+  `config.build_kline_adapter`/`build_account_adapter` pick the right one by
+  the bot's own declared `exchange`. A venue with no adapter yet just omits
+  that panel instead of erroring.
 
 ## Layout
 
@@ -49,11 +56,15 @@ adapters/
   discovery.py            finds bots by scanning for the files they write
   stats.py                FIFO realised PnL + fill metrics (pure, no I/O)
   bot_files.py            reads one bot's state (orderbook, positions, fills, quotes)
+  basis.py                pure: pairs legs sharing a base asset, mid gap in bps
   bitunix_account.py      Bitunix REST, signed, GET-only (margin/equity)
   bitunix_klines.py       Bitunix REST, public (candles, 8 timeframes)
-  basis.py                pure: pairs legs sharing a base asset, mid gap in bps
+  coinbase_account.py     Coinbase Advanced Trade SDK (quote-currency balance; spot, no margin)
+  coinbase_klines.py      Coinbase Advanced Trade REST, public (candles)
+  okx_account.py          OKX v5 REST, signed, GET-only; forces IPv4 (OKX's IP allow-list rejects IPv6)
+  okx_klines.py           OKX v5 REST, public (resolves the rolling instId, then candles)
 static/                   index.html + app.js + fill_markers.js + charting vendor
-tests/                    hand-computed cases for the PnL engine
+tests/                    hand-computed cases for the PnL engine + basis pairing
 deploy/                   systemd unit
 ```
 
@@ -97,23 +108,26 @@ of this calculation are documented at the top of `adapters/stats.py`.
 ## Tests
 
 ```bash
-venv/bin/python tests/test_stats.py
+venv/bin/python -m pytest tests/ -p no:anchorpy
 ```
+
+(`-p no:anchorpy` sidesteps an unrelated broken pytest plugin some machines
+have installed globally; harmless to include even where it isn't needed.)
 
 ## Running locally
 
 ```bash
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
-cp .env.example .env      # optional: only needed for the margin panel
+cp .env.example .env      # optional: only needed for the margin panels
 ./run.sh
 ```
 
 Then open <http://127.0.0.1:8091>.
 
-Without credentials the dashboard still runs — the margin panel simply reports
-that account data is unavailable, and the chart, fills, positions and order
-book all work.
+Without credentials the dashboard still runs — every venue's margin panel
+simply reports that account data is unavailable, and the chart, fills,
+positions and order book all work regardless.
 
 ## Deployment
 
