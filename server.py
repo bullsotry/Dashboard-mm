@@ -145,7 +145,7 @@ def _refresh(force: bool = False) -> dict[str, DiscoveredBot]:
             if key not in _kline_adapters:
                 _kline_adapters[key] = config.build_kline_adapter(bot.exchange, bot.symbol)
             if key not in _account_adapters:
-                _account_adapters[key] = config.build_account_adapter(bot.exchange)
+                _account_adapters[key] = config.build_account_adapter(bot.exchange, bot.symbol)
 
         for key in set(_bots) - set(found):
             _state_adapters.pop(key, None)

@@ -13,7 +13,9 @@ import os
 
 from adapters.bitunix_account import BitunixAccountAdapter
 from adapters.bitunix_klines import BitunixKlineAdapter
+from adapters.coinbase_account import CoinbaseAccountAdapter
 from adapters.coinbase_klines import CoinbaseKlineAdapter
+from adapters.okx_account import OkxAccountAdapter
 from adapters.okx_klines import OkxKlineAdapter
 
 # Roots scanned for bot state files. Globs, colon-separated, overridable so
@@ -84,16 +86,44 @@ def build_kline_adapter(exchange: str, symbol: str):
     return None
 
 
-def build_account_adapter(exchange: str):
-    """Account margin, only where credentials exist for that exchange."""
-    if exchange != "bitunix":
-        return None
-    api_key = os.environ.get("BITUNIX_API_KEY")
-    secret_key = os.environ.get("BITUNIX_SECRET_KEY")
-    if not api_key or not secret_key:
-        return None
-    return BitunixAccountAdapter(
-        api_key=api_key,
-        secret_key=secret_key,
-        poll_interval_s=ACCOUNT_POLL_INTERVAL_S,
-    )
+def build_account_adapter(exchange: str, symbol: str):
+    """Account margin, only where credentials exist for that exchange.
+
+    `symbol` is unused by Bitunix/OKX (their account endpoint is scoped by
+    margin coin, not by product) but Coinbase needs it to pick the right
+    quote-currency balance out of a spot account list.
+    """
+    if exchange == "bitunix":
+        api_key = os.environ.get("BITUNIX_API_KEY")
+        secret_key = os.environ.get("BITUNIX_SECRET_KEY")
+        if not api_key or not secret_key:
+            return None
+        return BitunixAccountAdapter(
+            api_key=api_key,
+            secret_key=secret_key,
+            poll_interval_s=ACCOUNT_POLL_INTERVAL_S,
+        )
+    if exchange == "okx":
+        api_key = os.environ.get("OKX_API_KEY")
+        secret_key = os.environ.get("OKX_SECRET_KEY")
+        passphrase = os.environ.get("OKX_PASSPHRASE")
+        if not api_key or not secret_key or not passphrase:
+            return None
+        return OkxAccountAdapter(
+            api_key=api_key,
+            secret_key=secret_key,
+            passphrase=passphrase,
+            poll_interval_s=ACCOUNT_POLL_INTERVAL_S,
+        )
+    if exchange == "coinbase":
+        api_key = os.environ.get("COINBASE_API_KEY")
+        api_secret = os.environ.get("COINBASE_API_SECRET")
+        if not api_key or not api_secret:
+            return None
+        return CoinbaseAccountAdapter(
+            api_key=api_key,
+            api_secret=api_secret,
+            symbol=symbol,
+            poll_interval_s=ACCOUNT_POLL_INTERVAL_S,
+        )
+    return None
