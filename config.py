@@ -38,6 +38,29 @@ DISCOVERY_INTERVAL_S = float(os.environ.get("DISCOVERY_INTERVAL_S", "15.0"))
 # memory per bot.
 FILLS_MAXLEN = int(os.environ.get("FILLS_MAXLEN", "2000"))
 
+# How many samples the basis sparkline keeps per venue pair. At the default
+# 1.5s frontend poll this is ~6 minutes of history — enough to see a basis
+# actually moving, not just its instantaneous value.
+BASIS_HISTORY_LEN = int(os.environ.get("BASIS_HISTORY_LEN", "240"))
+
+# Freshness thresholds a bot's state is judged against, in seconds. Mirrored
+# in static/app.js as BOT_STALE_MS/BOT_DEAD_MS (milliseconds there) — kept in
+# sync by hand, not shared code, because one is Python judging a background
+# thread and the other is JS judging a poll response; change both together.
+BOT_STALE_S = float(os.environ.get("BOT_STALE_S", "15.0"))
+BOT_DEAD_S = float(os.environ.get("BOT_DEAD_S", "60.0"))
+
+# How often the background thread re-checks every bot's freshness for the
+# incident timeline. This runs independently of any browser polling the
+# dashboard, so a halt that happens while no tab is open is still recorded —
+# the entire point of a timeline instead of a live badge.
+STATE_POLL_S = float(os.environ.get("STATE_POLL_S", "5.0"))
+
+# Per-bot transition history depth, and how many of the most recent
+# transitions (across all bots) the incidents feed returns.
+STATE_HISTORY_MAXLEN = int(os.environ.get("STATE_HISTORY_MAXLEN", "50"))
+INCIDENTS_LIMIT = int(os.environ.get("INCIDENTS_LIMIT", "30"))
+
 POLL_INTERVAL_S = float(os.environ.get("POLL_INTERVAL_S", "1.0"))
 ACCOUNT_POLL_INTERVAL_S = float(os.environ.get("ACCOUNT_POLL_INTERVAL_S", "5.0"))
 KLINE_POLL_INTERVAL_S = float(os.environ.get("KLINE_POLL_INTERVAL_S", "20.0"))

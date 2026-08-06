@@ -348,6 +348,69 @@ function renderPosition(venue) {
   body.innerHTML = rows.join("");
 }
 
+// --- Cross-venue basis ---
+// Independent of which bot is selected in the chart: a two-leg MM bot (quote
+// on one venue, hedge/reference on another) can drift from its own reference
+// without either leg individually looking wrong, so this reads from every
+// discovered pair, not the active one.
+function sparklineSvg(values, w = 60, h = 16) {
+  if (!values || values.length < 2) return "";
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const step = w / (values.length - 1);
+  const pts = values
+    .map((v, i) => `${(i * step).toFixed(1)},${(h - ((v - min) / range) * h).toFixed(1)}`)
+    .join(" ");
+  return `<svg width="${w}" height="${h}" class="basis-spark"><polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`;
+}
+
+function renderBasis(pairs) {
+  const body = document.getElementById("basis-body");
+  if (!pairs || pairs.length === 0) {
+    body.innerHTML = `<div class="empty-note">need 2 legs on different venues</div>`;
+    return;
+  }
+  body.innerHTML = pairs
+    .map((p) => {
+      const cls = p.bps >= 0 ? "pnl-pos" : "pnl-neg";
+      return `<div class="row basis-row">
+        <span class="label">${p.label}</span>
+        <span class="val ${cls}">${sparklineSvg(p.history)}${fmt(p.bps, 1)} bps</span>
+      </div>`;
+    })
+    .join("");
+}
+
+// --- Incident timeline ---
+// State transitions the server observed on its own background clock, not on
+// this browser's poll loop — a halt that happened while no tab was open
+// still appears here, which the live/warn/dead dot alone can never show.
+let lastIncidentsSig = "";
+
+function renderIncidents(events, serverTs) {
+  const body = document.getElementById("incidents-body");
+  if (!events || events.length === 0) {
+    body.innerHTML = `<div class="empty-note">no transitions observed yet</div>`;
+    lastIncidentsSig = "";
+    return;
+  }
+  const sig = events.map((e) => `${e.bot}|${e.ts}|${e.to}`).join(",");
+  if (sig === lastIncidentsSig) return;
+  lastIncidentsSig = sig;
+
+  const cls = (to) => (to === "dead" ? "pnl-neg" : to === "live" ? "pnl-pos" : "");
+  body.innerHTML = events
+    .map((e) => {
+      const ageS = Math.max(0, serverTs - e.ts);
+      return `<div class="row incident-row">
+        <span class="label">${e.label}</span>
+        <span class="val ${cls(e.to)}">${e.from} &rarr; ${e.to}<small>${fmtDuration(ageS)} ago</small></span>
+      </div>`;
+    })
+    .join("");
+}
+
 // --- Bot selection ---
 // null means "let the server pick the freshest", which is what a first load
 // wants: land on whatever is actually running rather than on an alphabetical
@@ -373,6 +436,43 @@ function botStateClass(ageS) {
   return "live";
 }
 
+// One-glance portfolio row: net position across a bot's legs (hedge mode
+// nets long+short into a single signed figure) and its combined uPnL. Only
+// meaningful while the bot is alive — a dead bot's last-written position is
+// a fossil, not a reading, so the caller passes `dead` and this refuses to
+// print it, same refusal as renderDeadBot for the selected bot.
+function botSummaryLine(bot, dead) {
+  if (dead) return `<span class="empty-note" style="font-size:10.5px;">stopped</span>`;
+
+  const positions = bot.positions || [];
+  if (positions.length === 0) {
+    const net =
+      bot.pnl_unreliable || bot.realised_net === null || bot.realised_net === undefined
+        ? ""
+        : `<span class="val ${bot.realised_net >= 0 ? "pnl-pos" : "pnl-neg"}">${fmt(bot.realised_net, 4)}</span>`;
+    return `<span class="label">flat</span>${net}`;
+  }
+
+  let netQty = 0;
+  let upnl = bot.account_upnl ?? 0;
+  let hasPosUpnl = false;
+  for (const p of positions) {
+    netQty += (p.side === "LONG" ? 1 : -1) * (p.qty_base || 0);
+    if (p.unrealised_pnl !== null && p.unrealised_pnl !== undefined) {
+      upnl += p.unrealised_pnl;
+      hasPosUpnl = true;
+    }
+  }
+  const side = netQty > 0 ? "long" : netQty < 0 ? "short" : "flat";
+  const showUpnl = hasPosUpnl || bot.account_upnl !== null;
+  const pnlCls = upnl >= 0 ? "pnl-pos" : "pnl-neg";
+  return (
+    `<span class="pos-side-label ${side}">${side}</span>` +
+    `<span class="val">${fmt(Math.abs(netQty), 3)}</span>` +
+    (showUpnl ? `<span class="val ${pnlCls}">${fmt(upnl, 4)}</span>` : "")
+  );
+}
+
 function renderBotList(bots, serverTs, selectedKey) {
   const body = document.getElementById("bots-body");
   const countEl = document.getElementById("bots-count");
@@ -392,7 +492,11 @@ function renderBotList(bots, serverTs, selectedKey) {
   // in it, so only touch the DOM when something actually changed. Ages are
   // bucketed to the second for the same reason.
   const sig = bots
-    .map((b) => `${b.key}|${b.source_ts ? Math.round(serverTs - b.source_ts) : "x"}`)
+    .map(
+      (b) =>
+        `${b.key}|${b.source_ts ? Math.round(serverTs - b.source_ts) : "x"}` +
+        `|${JSON.stringify(b.positions || [])}|${b.realised_net}|${b.account_upnl}`
+    )
     .join(",") + `|${selectedKey}`;
   if (sig === lastBotsSig) return;
   lastBotsSig = sig;
@@ -403,9 +507,12 @@ function renderBotList(bots, serverTs, selectedKey) {
       const cls = botStateClass(ageS);
       const active = b.key === selectedKey ? " active" : "";
       return `<div class="bot-row ${cls}${active}" data-bot="${b.key}">
-        <span class="dot"></span>
-        <span class="name">${b.label}</span>
-        <span class="age">${ageS === null ? "—" : fmtDuration(ageS)}</span>
+        <div class="top-line">
+          <span class="dot"></span>
+          <span class="name">${b.label}</span>
+          <span class="age">${ageS === null ? "—" : fmtDuration(ageS)}</span>
+        </div>
+        <div class="bottom-line">${botSummaryLine(b, cls === "dead")}</div>
       </div>`;
     })
     .join("");
@@ -637,6 +744,8 @@ async function poll() {
     const data = await resp.json();
 
     renderBotList(data.bots, data.server_ts, data.bot);
+    renderBasis(data.basis || []);
+    renderIncidents(data.incidents || [], data.server_ts);
     // The server honours the requested bot when it still exists, so a
     // mismatch means either no choice had been made yet (first load lands on
     // the freshest bot) or the chosen bot vanished and was substituted.

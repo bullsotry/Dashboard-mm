@@ -191,6 +191,22 @@
   #side::-webkit-scrollbar-track { background: transparent; }
   #side::-webkit-scrollbar-thumb { background: var(--panel-border); border-radius: 4px; }
 
+  /* Cross-venue basis: the one signal generic single-exchange dashboards
+     never show. A gap that only ever grows means the two legs are drifting
+     apart, not just noisily different — the sparkline is what tells "always
+     been this way" apart from "just started moving". */
+  .basis-row .val { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .basis-spark { color: inherit; vertical-align: middle; flex: 0 0 auto; }
+
+  /* Recorded by a background thread independent of the browser polling, so
+     a halt that happens while nobody is watching still shows up here —
+     the whole reason this exists instead of just the live/warn/dead dot. */
+  #incidents-body { max-height: 160px; overflow-y: auto; }
+  .incident-row { font-size: 10.5px; padding: 2px 0; }
+  .incident-row .label { font-family: ui-monospace, Menlo, monospace; }
+  .incident-row .val { font-weight: 600; }
+  .incident-row .val small { font-weight: 400; color: var(--text-faint); margin-left: 4px; }
+
   .row { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; padding: 1.5px 0; }
   .row .label { color: var(--text-dim); }
   .row .val { font-family: ui-monospace, Menlo, monospace; color: var(--text); }
@@ -217,14 +233,18 @@
   /* Bot list. Discovered bots are always listed, running or not — a bot
      that stopped must read as dead, never vanish, because a missing row is
      indistinguishable from a bot that never existed. */
+  /* Two lines per bot: identity/age on top, portfolio summary (net position,
+     uPnL) below — the row a Tealstreet-style unified positions table would
+     show, without needing a separate panel or a second click to see it. */
   .bot-row {
-    display: flex; align-items: center; gap: 7px;
-    padding: 3px 6px; margin: 0 -6px;
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 4px 6px; margin: 0 -6px;
     cursor: pointer; font-size: 12px;
     border-left: 2px solid transparent;
   }
   .bot-row:hover { background: var(--btn-bg-active); }
   .bot-row.active { background: var(--btn-bg-active); border-left-color: var(--accent); }
+  .bot-row .top-line { display: flex; align-items: center; gap: 7px; }
   .bot-row .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: var(--text-faint); }
   .bot-row.live .dot { background: var(--bull); }
   .bot-row.warn .dot { background: var(--accent); }
@@ -233,6 +253,14 @@
   .bot-row.dead .name { color: var(--text-faint); }
   .bot-row .age { font-size: 10.5px; color: var(--text-faint); font-family: ui-monospace, Menlo, monospace; }
   .bot-row .nochart { font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+  .bot-row .bottom-line {
+    display: flex; align-items: center; gap: 6px; padding-left: 14px;
+    font-family: ui-monospace, Menlo, monospace; font-size: 10.5px;
+  }
+  .bot-row .bottom-line .pos-side-label { font-size: 9px; padding: 0 4px; margin-bottom: 0; }
+  /* :not() keeps this from outranking .pnl-pos/.pnl-neg, which need to win
+     here exactly as they do everywhere else in the rail. */
+  .bot-row .bottom-line .val:not(.pnl-pos):not(.pnl-neg) { color: var(--text-dim); }
 
   .stat-net { border-top: 1px solid var(--divider); margin-top: 6px; padding-top: 6px; }
   /* Shown instead of a realised PnL that cannot be defended. Deliberately
@@ -304,6 +332,16 @@
     <div class="panel" id="bots-panel">
       <h2>Bots <span class="window-note" id="bots-count">—</span></h2>
       <div id="bots-body"><div class="empty-note">scanning…</div></div>
+    </div>
+
+    <div class="panel" id="basis-panel">
+      <h2>Basis</h2>
+      <div id="basis-body"><div class="empty-note">need 2 legs on different venues</div></div>
+    </div>
+
+    <div class="panel" id="incidents-panel">
+      <h2>Incidents</h2>
+      <div id="incidents-body"><div class="empty-note">no transitions observed yet</div></div>
     </div>
 
     <div class="panel">

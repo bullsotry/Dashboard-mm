@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -16,6 +17,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import config
+from adapters.basis import compute_basis_pairs
 from adapters.bitunix_klines import DEFAULT_INTERVAL
 from adapters.bot_files import BotStateAdapter
 from adapters.discovery import DiscoveredBot, discover
@@ -34,6 +36,79 @@ _state_adapters: dict[str, BotStateAdapter] = {}
 _kline_adapters: dict[str, object] = {}
 _account_adapters: dict[str, object] = {}
 _last_scan_ts = 0.0
+
+# Basis history is keyed by "leg_a|leg_b" (stable per venue pair) and kept
+# across polls independently of which bot is selected in the chart — the
+# basis panel shows every discovered pair, not just the active one.
+_basis_history: dict[str, deque] = {}
+
+# Per-bot live/warn/dead transition log, and the classification each bot was
+# last seen in (so a transition is only recorded on an actual change, not on
+# every background tick). Written only by _record_transitions, running on
+# its own thread below — independent of whether a browser is polling, so a
+# halt that happens unattended still lands in the timeline.
+_state_history: dict[str, deque] = {}
+_last_class: dict[str, str | None] = {}
+
+
+def _classify(age_s: float | None) -> str | None:
+    if age_s is None:
+        return None
+    if age_s > config.BOT_DEAD_S:
+        return "dead"
+    if age_s > config.BOT_STALE_S:
+        return "warn"
+    return "live"
+
+
+def _record_transitions(found: dict[str, DiscoveredBot]) -> None:
+    now = time.time()
+    with _lock:
+        for key in found:
+            adapter = _state_adapters.get(key)
+            src_ts = adapter.get_source_ts() if adapter else None
+            cls = _classify(now - src_ts if src_ts else None)
+            prev = _last_class.get(key)
+            # prev is None only on the very first observation of this bot —
+            # that is discovery, not an incident, so it is not logged.
+            if prev is not None and cls != prev:
+                hist = _state_history.setdefault(key, deque(maxlen=config.STATE_HISTORY_MAXLEN))
+                hist.append({"ts": now, "from": prev, "to": cls})
+            _last_class[key] = cls
+        # A bot dropped by discovery (its files were deleted) has nothing
+        # left to classify; drop its bookkeeping so it doesn't linger forever.
+        for key in set(_last_class) - set(found):
+            _last_class.pop(key, None)
+            _state_history.pop(key, None)
+
+
+def _incidents_feed(found: dict[str, DiscoveredBot]) -> list[dict]:
+    events = []
+    for key, hist in _state_history.items():
+        if key not in found:
+            continue
+        label = found[key].label
+        for ev in hist:
+            events.append({**ev, "bot": key, "label": label})
+    events.sort(key=lambda e: e["ts"], reverse=True)
+    return events[: config.INCIDENTS_LIMIT]
+
+
+def _background_state_loop() -> None:
+    """Ticks on its own clock so incidents are caught whether or not a
+    browser tab happens to be open polling /snapshot at that moment."""
+    while True:
+        try:
+            _record_transitions(_refresh())
+        except Exception:
+            # A monitoring loop must never die from a transient error (a
+            # glob race, a half-written file) — it has nothing to report to
+            # and no caller to raise to; it just tries again next tick.
+            pass
+        time.sleep(config.STATE_POLL_S)
+
+
+threading.Thread(target=_background_state_loop, daemon=True).start()
 
 
 def _refresh(force: bool = False) -> dict[str, DiscoveredBot]:
@@ -108,6 +183,64 @@ def bots() -> dict:
     return {"server_ts": time.time(), "bots": out}
 
 
+def _compute_basis(found: dict[str, DiscoveredBot]) -> list[dict]:
+    """Cross-venue mid basis for every pair of legs sharing an asset.
+
+    Reads each bot's own orderbook (already-cached local file, no network
+    call), so this costs one extra dict read per discovered bot per poll —
+    negligible next to the kline/account fetches already happening. History
+    is appended here rather than in a background loop: a pair with no active
+    poller (nobody has this dashboard open) correctly keeps no history.
+    """
+    legs = []
+    for key, bot in found.items():
+        adapter = _state_adapters.get(key)
+        ob = adapter.get_orderbook() if adapter else None
+        legs.append(
+            {
+                "key": key,
+                "exchange": bot.exchange,
+                "symbol": bot.symbol,
+                "mid": ob["mid"] if ob else 0.0,
+            }
+        )
+
+    out = []
+    for pair in compute_basis_pairs(legs):
+        hist_key = f"{pair['a']}|{pair['b']}"
+        hist = _basis_history.setdefault(hist_key, deque(maxlen=config.BASIS_HISTORY_LEN))
+        hist.append(pair["bps"])
+        out.append({**pair, "history": list(hist)})
+    return out
+
+
+def _bot_summary(key: str, bot_info: DiscoveredBot) -> dict:
+    """Enough of one bot's state to render it as a row in the portfolio
+    table, without the caller having to select it first. Cheap: positions and
+    stats are local-file reads already cached incrementally by the adapter,
+    and the account adapter caches its own REST poll independently — calling
+    it here for every discovered bot on every snapshot does not add REST
+    calls beyond what that adapter's own poll interval already allows."""
+    adapter = _state_adapters[key]
+    stats = adapter.get_stats()
+    account_adapter = _account_adapters.get(key)
+    account = account_adapter.get_account() if account_adapter else None
+    return {
+        "key": key,
+        "label": bot_info.label,
+        "exchange": bot_info.exchange,
+        "symbol": bot_info.symbol,
+        "source_ts": adapter.get_source_ts(),
+        "positions": adapter.get_positions(),
+        # None when the ledger can't defend a figure — same refusal as the
+        # selected bot's own stats panel, so a portfolio row never states a
+        # realised PnL the fills window doesn't support.
+        "realised_net": None if stats.get("pnl_unreliable") else stats["realised_net"],
+        "pnl_unreliable": stats.get("pnl_unreliable"),
+        "account_upnl": account["unrealised_pnl"] if account else None,
+    }
+
+
 def _klines_sig(candles: list) -> str:
     """Cheap identity for a candle list. Only the newest bar mutates in place
     (the one still forming), so its OHLC plus the list bounds is enough to
@@ -130,7 +263,12 @@ def snapshot(
     instead of thousands of identical rows."""
     found = _refresh()
     if not found:
-        return {"server_ts": time.time(), "bot": None, "bots": [], "venue": None}
+        return {"server_ts": time.time(), "bot": None, "bots": [], "venue": None, "basis": [], "incidents": []}
+
+    # Spans every discovered bot, not just the selected one, so the basis
+    # panel keeps reading even while the chart is pointed at a single leg.
+    basis = _compute_basis(found)
+    incidents = _incidents_feed(found)
 
     # An unknown or omitted bot falls back to the freshest one, so a first
     # load with no selection lands on whatever is actually running.
@@ -187,16 +325,16 @@ def snapshot(
         "supported_intervals": supported,
     }
 
-    bot_list = [
-        {
-            "key": k,
-            "label": found[k].label,
-            "source_ts": _state_adapters[k].get_source_ts(),
-        }
-        for k in sorted(found)
-    ]
+    bot_list = [_bot_summary(k, found[k]) for k in sorted(found)]
 
     # Server clock, so the frontend measures bot staleness against the same
     # clock that produced source_ts instead of against the browser's, which
     # can be minutes off and would make a healthy bot look dead.
-    return {"server_ts": time.time(), "bot": bot, "bots": bot_list, "venue": venue}
+    return {
+        "server_ts": time.time(),
+        "bot": bot,
+        "bots": bot_list,
+        "venue": venue,
+        "basis": basis,
+        "incidents": incidents,
+    }

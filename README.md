@@ -51,10 +51,38 @@ adapters/
   bot_files.py            reads one bot's state (orderbook, positions, fills, quotes)
   bitunix_account.py      Bitunix REST, signed, GET-only (margin/equity)
   bitunix_klines.py       Bitunix REST, public (candles, 8 timeframes)
+  basis.py                pure: pairs legs sharing a base asset, mid gap in bps
 static/                   index.html + app.js + fill_markers.js + charting vendor
 tests/                    hand-computed cases for the PnL engine
 deploy/                   systemd unit
 ```
+
+## Cross-venue basis
+
+For a bot that runs two legs on different exchanges (quote on one, hedge or
+price off another), the basis panel shows the mid-price gap between them in
+bps, with a rolling sparkline. It reads every discovered pair's orderbook
+each poll — not just the currently selected bot — because a two-leg bot can
+drift from its own reference while both legs individually look fine. Pairing
+is by normalised base asset (`SOLUSDT` and `SOL-USD` both key to `SOL`); two
+legs on the *same* exchange are never paired, since that would be a naming
+collision, not a basis. See `adapters/basis.py`.
+
+## Portfolio row & incident timeline
+
+The bot list doubles as a unified portfolio table: each row shows the bot's
+net position, side and combined uPnL without having to select it first — a
+dead bot shows "stopped" instead of its last frozen numbers, same refusal as
+the rest of the dashboard.
+
+A background thread (`_background_state_loop` in `server.py`, `STATE_POLL_S`
+apart) watches every discovered bot's freshness on its own clock and logs
+live/warn/dead transitions to an in-memory ring buffer, independent of
+whether a browser tab is open polling `/snapshot`. The incidents panel is
+that log: a halt that happened overnight while nobody was watching still
+shows up when you open the dashboard the next morning. History is
+process-memory only — it resets on a server restart, and the first
+observation of a bot is discovery, not an incident, so it is never logged.
 
 ## Reading the performance panel
 
