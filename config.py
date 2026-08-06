@@ -14,6 +14,7 @@ import os
 from adapters.bitunix_account import BitunixAccountAdapter
 from adapters.bitunix_klines import BitunixKlineAdapter
 from adapters.coinbase_klines import CoinbaseKlineAdapter
+from adapters.okx_klines import OkxKlineAdapter
 
 # Roots scanned for bot state files. Globs, colon-separated, overridable so
 # the dashboard can watch a different install without a code change. The
@@ -78,6 +79,8 @@ def build_kline_adapter(exchange: str, symbol: str):
         return BitunixKlineAdapter(symbol=symbol, poll_interval_s=KLINE_POLL_INTERVAL_S)
     if exchange == "coinbase":
         return CoinbaseKlineAdapter(symbol=symbol, poll_interval_s=KLINE_POLL_INTERVAL_S)
+    if exchange == "okx":
+        return OkxKlineAdapter(symbol=symbol, poll_interval_s=KLINE_POLL_INTERVAL_S)
     return None
 
 
