@@ -116,14 +116,20 @@ def build_account_adapter(exchange: str, symbol: str):
             poll_interval_s=ACCOUNT_POLL_INTERVAL_S,
         )
     if exchange == "coinbase":
+        # COINBASE_KEY_FILE matches the env var name the bot itself already
+        # uses (see v17mm's .env) — reusing it means no new credential has
+        # to be minted just for this dashboard. COINBASE_API_KEY/SECRET is
+        # the fallback for a raw key/secret pair instead of a key file.
+        key_file = os.environ.get("COINBASE_KEY_FILE")
         api_key = os.environ.get("COINBASE_API_KEY")
         api_secret = os.environ.get("COINBASE_API_SECRET")
-        if not api_key or not api_secret:
+        if not key_file and not (api_key and api_secret):
             return None
         return CoinbaseAccountAdapter(
+            symbol=symbol,
+            key_file=key_file,
             api_key=api_key,
             api_secret=api_secret,
-            symbol=symbol,
             poll_interval_s=ACCOUNT_POLL_INTERVAL_S,
         )
     return None

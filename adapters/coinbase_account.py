@@ -35,8 +35,24 @@ def _quote_currency(symbol: str) -> str:
 
 
 class CoinbaseAccountAdapter:
-    def __init__(self, api_key: str, api_secret: str, symbol: str, poll_interval_s: float = 5.0):
-        self._client = RESTClient(api_key=api_key, api_secret=api_secret) if RESTClient else None
+    def __init__(
+        self,
+        symbol: str,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        key_file: str | None = None,
+        poll_interval_s: float = 5.0,
+    ):
+        """Either `key_file` (a CDP JSON key file path — what the bot itself
+        uses, via COINBASE_KEY_FILE) or `api_key`/`api_secret` directly. Both
+        forms are handed straight to the SDK; it's the one that knows how to
+        turn either into a signed request."""
+        if RESTClient is None:
+            self._client = None
+        elif key_file:
+            self._client = RESTClient(key_file=key_file)
+        else:
+            self._client = RESTClient(api_key=api_key, api_secret=api_secret)
         self._quote = _quote_currency(symbol)
         self._poll_interval_s = poll_interval_s
         self._cached: Account | None = None
