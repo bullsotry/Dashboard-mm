@@ -61,7 +61,9 @@ tar czf - \
   adapters/okx_account.py adapters/okx_klines.py \
   static/index.html static/app.js static/fill_markers.js \
   static/vendor/lightweight-charts.standalone.production.js \
-  tests/test_stats.py tests/test_basis.py \
+  tests/test_stats.py tests/test_basis.py tests/test_bot_files.py \
+  tests/test_discovery.py tests/test_okx_klines.py tests/test_coinbase_klines.py \
+  tests/test_okx_account.py tests/test_coinbase_account.py \
   deploy/dashboard-mm.service \
 | ssh "$VPS" 'tar xzf - -C /root/dashboard-mm'
 ```
