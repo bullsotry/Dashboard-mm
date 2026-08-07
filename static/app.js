@@ -758,6 +758,10 @@ async function poll() {
     const venue = data.venue;
     if (venue) {
       currentSymbol = venue.symbol || "";
+      // The tab title names whichever bot/venue is actually selected, not a
+      // fixed exchange — this dashboard watches whatever the operator is
+      // running today, not just Bitunix.
+      document.title = venue.label ? `MM Dashboard — ${venue.label}` : "MM Dashboard";
 
       // Age is resolved *before* anything is drawn: what a bot asserts about
       // its position, PnL and book is only worth rendering while the bot is
@@ -798,6 +802,7 @@ async function poll() {
       currentSymbol = "";
       lastOrderbook = null;
       botAgeAtPollS = null;
+      document.title = "MM Dashboard";
       resetChartState();
       renderPosition({ positions: [], account: null });
       renderStats(null);
