@@ -4,11 +4,13 @@ Real-time, **read-only** monitoring dashboard for the v17mm market-making
 fleet — Bitunix, Coinbase and OKX legs, whichever of them are running.
 
 It renders a candlestick chart (real klines from whichever venue the
-selected bot trades on) with buy/sell fill markers, the bot's own resting
-quotes and entry prices drawn as price lines, a position & margin panel, a
-performance panel, and a toggleable order book. The backend is a single
-FastAPI route (`/snapshot`) that the frontend polls; everything else is a
-static file.
+selected bot trades on, with a volume histogram) with buy/sell fill markers,
+the bot's own resting quotes and entry prices drawn as price lines, a
+position & margin panel, a performance panel, a toggleable order book, and a
+Curve/Delta/Volume/NAV panel pair — cumulative realised PnL, running
+inventory, cumulative traded notional and account equity, each as a mini
+chart instead of just a single number. The backend is a single FastAPI route
+(`/snapshot`) that the frontend polls; everything else is a static file.
 
 ## Freshness is a first-class signal
 
@@ -64,7 +66,7 @@ adapters/
   okx_account.py          OKX v5 REST, signed, GET-only; forces IPv4 (OKX's IP allow-list rejects IPv6)
   okx_klines.py           OKX v5 REST, public (resolves the rolling instId, then candles)
 static/                   index.html + app.js + fill_markers.js + charting vendor
-tests/                    hand-computed cases for the PnL engine + basis pairing
+tests/                    hand-computed cases for the PnL engine + basis pairing + adapters
 deploy/                   systemd unit
 ```
 
@@ -104,6 +106,29 @@ the venue reported per fill; `realised net` is the only number that reflects
 a result. Open inventory is deliberately *not* marked to market, and is shown
 separately, so a settled figure is never mixed with a floating one. The limits
 of this calculation are documented at the top of `adapters/stats.py`.
+
+## Curve, Delta, Volume & NAV
+
+Four running series, built from the same data two different ways:
+
+- **Curve** (cumulative realised PnL) and **Delta** (running inventory) are
+  the Performance panel's FIFO replay (`adapters/stats.py:equity_curve`),
+  plotted point-by-point instead of collapsed to a total. They refuse to
+  render under the same condition the Performance panel does — see
+  `pnl_unreliable` below — because a replay that can't defend its total
+  can't defend any point on its curve either.
+- **Volume** (cumulative traded notional) comes from the same replay but
+  does *not* depend on FIFO lot matching — it's a plain running sum of
+  `price * size` — so it stays honest and keeps rendering even on a window
+  Curve/Delta have refused, e.g. right after a restart before the ledger has
+  caught up with the exchange.
+- **NAV** (account equity) is different in kind: it's not derived from fills
+  at all, it's `available + margin_used + unrealised_pnl` off each venue's
+  own account adapter (OKX reports equity directly; Bitunix and Coinbase
+  derive it the same way). Because it isn't a replay of stored fills, there
+  is no ledger to rebuild history from — the curve is whatever this
+  dashboard has sampled, one point per poll, while it's been open. A first
+  load on a freshly started dashboard starts with one point, not history.
 
 ## Tests
 
