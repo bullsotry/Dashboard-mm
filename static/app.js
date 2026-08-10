@@ -713,6 +713,7 @@ function renderCurve(curve) {
   const emptyEl = document.getElementById("curve-empty");
   const blocks = panel.querySelectorAll(".mini-chart-block:not(#volume-curve-block)");
   const curveVal = document.getElementById("curve-val");
+  const curveDdVal = document.getElementById("curve-dd-val");
   const deltaVal = document.getElementById("delta-val");
 
   if (!curve || curve.length === 0) {
@@ -720,6 +721,7 @@ function renderCurve(curve) {
     emptyEl.style.display = "";
     emptyEl.textContent = "no fills yet";
     curveVal.textContent = "—";
+    curveDdVal.textContent = "dd —";
     deltaVal.textContent = "—";
     lastCurveSig = "";
     return;
@@ -730,16 +732,19 @@ function renderCurve(curve) {
     // Same refusal as the Performance panel, for the same reason: a replay
     // that can't defend its total can't defend any point on its curve
     // either — plotting it anyway would just move the lie into a chart.
+    // Drawdown is derived from realised_net, so it's exactly as fictional
+    // as the total on a window flagged unreliable — same refusal.
     blocks.forEach((b) => (b.style.display = "none"));
     emptyEl.style.display = "";
     emptyEl.innerHTML = `<div class="pnl-blocked-title">unavailable</div><div class="pnl-blocked-why">${last.pnl_unreliable}</div>`;
     curveVal.textContent = "—";
+    curveDdVal.textContent = "dd —";
     deltaVal.textContent = "—";
     lastCurveSig = "";
     return;
   }
 
-  const sig = `${curve.length}|${last.ts}|${last.realised_net}|${last.inventory_base}`;
+  const sig = `${curve.length}|${last.ts}|${last.realised_net}|${last.inventory_base}|${last.max_drawdown}`;
   if (sig === lastCurveSig) return;
   lastCurveSig = sig;
 
@@ -753,6 +758,9 @@ function renderCurve(curve) {
 
   curveVal.textContent = fmt(last.realised_net, 4);
   curveVal.className = `val ${last.realised_net >= 0 ? "pnl-pos" : "pnl-neg"}`;
+  // Drawdown is a magnitude (always >= 0); shown negated ("dd -3.20") since
+  // that's how far below the peak the curve currently sits, not a gain.
+  curveDdVal.textContent = `dd ${last.max_drawdown > 0 ? "-" : ""}${fmt(last.max_drawdown, 4)}`;
   deltaVal.textContent = fmt(last.inventory_base, 3);
   deltaVal.className = `val ${last.inventory_base >= 0 ? "pnl-pos" : "pnl-neg"}`;
 }

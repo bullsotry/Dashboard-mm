@@ -116,7 +116,11 @@ Four running series, built from the same data two different ways:
   plotted point-by-point instead of collapsed to a total. They refuse to
   render under the same condition the Performance panel does — see
   `pnl_unreliable` below — because a replay that can't defend its total
-  can't defend any point on its curve either.
+  can't defend any point on its curve either. The Curve header also shows
+  **max drawdown**: the largest peak-to-trough drop the realised-PnL curve
+  has taken over the window, updated every point. It's derived from
+  `realised_net`, so it inherits the same refusal — a curve that can't
+  defend its total can't defend its drawdown either.
 - **Volume** (cumulative traded notional) comes from the same replay but
   does *not* depend on FIFO lot matching — it's a plain running sum of
   `price * size` — so it stays honest and keeps rendering even on a window

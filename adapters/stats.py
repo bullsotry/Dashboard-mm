@@ -198,6 +198,16 @@ def equity_curve(
     flags as unreliable; it still carries the same `pnl_unreliable` verdict
     on every point purely so callers get one flag per point instead of
     juggling two.
+
+    `drawdown` and `max_drawdown` ride on the realised-PnL side of the same
+    replay, so they inherit `pnl_unreliable` the same way `realised_net`
+    does: a peak-to-trough drop computed on a curve that can't defend its
+    own total is exactly as fictional as the total. `drawdown` is how far
+    below the running peak the curve sits *at this point*; `max_drawdown` is
+    the largest that has ever been, so far — both start at 0.0 (the curve's
+    implicit starting value before the first fill), and `max_drawdown` is
+    monotonically non-decreasing, so its value on the last point is the
+    window's overall max drawdown.
     """
     ordered = sorted(fills, key=lambda f: f["ts"])
 
@@ -205,16 +215,24 @@ def equity_curve(
     cum_realised = 0.0
     cum_fees = 0.0
     cum_volume_quote = 0.0
+    peak = 0.0  # the curve starts at 0 before the first fill
+    max_drawdown = 0.0
     for step in _replay(ordered):
         cum_realised += step["realised_delta"]
         cum_fees += step["fee"]
         cum_volume_quote += step["price"] * step["size"]
+        realised_net = cum_realised - cum_fees
+        peak = max(peak, realised_net)
+        drawdown = peak - realised_net
+        max_drawdown = max(max_drawdown, drawdown)
         out.append(
             {
                 "ts": step["ts"],
-                "realised_net": cum_realised - cum_fees,
+                "realised_net": realised_net,
                 "inventory_base": step["inventory_base"],
                 "cum_volume_quote": cum_volume_quote,
+                "drawdown": drawdown,
+                "max_drawdown": max_drawdown,
             }
         )
 

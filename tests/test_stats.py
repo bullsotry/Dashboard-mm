@@ -185,11 +185,15 @@ def test_equity_curve_matches_compute_stats_final_point():
     stats = compute_stats(fills)
     curve = equity_curve(fills)
     assert len(curve) == 2
+    # First point: net -0.1, never above 0 (the curve's implicit start) yet,
+    # so peak stays 0 and drawdown is the full -0.1 -> 0.1.
     assert curve[0] == {
         "ts": 1,
         "realised_net": -0.1,
         "inventory_base": 1.0,
         "cum_volume_quote": 100.0,
+        "drawdown": 0.1,
+        "max_drawdown": 0.1,
         "pnl_unreliable": None,
     }
     assert approx(curve[-1]["realised_net"], stats["realised_net"])
@@ -237,6 +241,37 @@ def test_equity_curve_carries_the_same_unreliable_verdict_as_compute_stats():
 
 def test_equity_curve_empty_fills():
     assert equity_curve([]) == []
+
+
+def test_equity_curve_drawdown_tracks_peak_to_trough():
+    # buy@100 (net 0) -> sell@103 (+3, net 3, new peak) -> sell@100 opens a
+    # short (net 3, unchanged) -> buy@110 closes it at a 10 loss (net -7,
+    # 10 below the peak of 3) -> buy@90 (net -7, unchanged) -> sell@95
+    # closes it at +5 (net -2, still 5 below the peak of 3).
+    fills = [
+        f(1, "buy", 100.0, 1.0),
+        f(2, "sell", 103.0, 1.0),
+        f(3, "sell", 100.0, 1.0),
+        f(4, "buy", 110.0, 1.0),
+        f(5, "buy", 90.0, 1.0),
+        f(6, "sell", 95.0, 1.0),
+    ]
+    curve = equity_curve(fills)
+    net = [round(p["realised_net"], 6) for p in curve]
+    assert net == [0.0, 3.0, 3.0, -7.0, -7.0, -2.0]
+
+    dd = [round(p["drawdown"], 6) for p in curve]
+    assert dd == [0.0, 0.0, 0.0, 10.0, 10.0, 5.0]
+
+    max_dd = [round(p["max_drawdown"], 6) for p in curve]
+    assert max_dd == [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]  # monotonically non-decreasing
+    assert max_dd[-1] == 10.0  # the window's overall max drawdown
+
+
+def test_equity_curve_max_drawdown_zero_when_curve_never_dips_below_its_peak():
+    fills = [f(1, "buy", 100.0, 1.0), f(2, "sell", 101.0, 1.0)]  # only ever climbs
+    curve = equity_curve(fills)
+    assert all(approx(p["max_drawdown"], 0.0) for p in curve)
 
 
 if __name__ == "__main__":

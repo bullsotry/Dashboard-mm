@@ -331,6 +331,11 @@
     margin-bottom: 2px;
   }
   .mini-chart-label .val { font-size: 11px; font-family: ui-monospace, Menlo, monospace; text-transform: none; letter-spacing: 0; }
+  /* Two figures sharing one header row (e.g. realised pnl + its max
+     drawdown) — the primary number stays full-size, the sub-figure is
+     dimmed and smaller so it reads as context, not a second headline. */
+  .mini-chart-vals { display: flex; align-items: baseline; gap: 6px; }
+  .mini-chart-vals .val-sub { font-size: 9.5px; color: var(--text-faint); }
   .mini-chart { height: 60px; }
 
   /* Below ~900px the fixed 300px rail leaves the chart unusably narrow, so
@@ -400,7 +405,13 @@
     <div class="panel" id="curve-panel">
       <h2>Curve, Delta &amp; Volume</h2>
       <div class="mini-chart-block">
-        <div class="mini-chart-label"><span>realised pnl (cum.)</span><span class="val" id="curve-val">—</span></div>
+        <div class="mini-chart-label">
+          <span>realised pnl (cum.)</span>
+          <span class="mini-chart-vals">
+            <span class="val" id="curve-val">—</span>
+            <span class="val val-sub" id="curve-dd-val">dd —</span>
+          </span>
+        </div>
         <div class="mini-chart" id="curve-chart"></div>
       </div>
       <div class="mini-chart-block">
