@@ -60,6 +60,9 @@ def test_get_account_finds_matching_quote_currency():
     assert approx(acc["available"], 100.5)
     assert approx(acc["margin_used"], 10.0)
     assert acc["unrealised_pnl"] == 0.0  # spot: always 0.0, never a real figure
+    # equity = available + held: quote-currency NAV, doesn't see base-asset
+    # inventory value (documented limitation, not a bug).
+    assert approx(acc["equity"], 110.5)
 
 
 def test_get_account_no_matching_currency_keeps_cache():

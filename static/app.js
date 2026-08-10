@@ -23,6 +23,14 @@ const rootStyle = getComputedStyle(document.documentElement);
 const token = (name) => rootStyle.getPropertyValue(name).trim();
 const BULL_COLOR = token("--bull");
 const BEAR_COLOR = token("--bear");
+// Dimmed variants for volume bars — support for the chart, not competing
+// with it, same spirit as the order-book rail sitting under the price.
+const hexToRgba = (hex, a) => {
+  const n = parseInt(hex.replace("#", ""), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+};
+const BULL_VOL_COLOR = hexToRgba(BULL_COLOR, 0.5);
+const BEAR_VOL_COLOR = hexToRgba(BEAR_COLOR, 0.5);
 
 const chartEl = document.getElementById("chart");
 const chartWrapEl = document.getElementById("chart-wrap");
@@ -62,6 +70,18 @@ const candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
   wickUpColor: BULL_COLOR,
   wickDownColor: BEAR_COLOR,
 });
+
+// Volume overlay: own price scale pinned to the bottom of the same pane
+// (margins below), never touching the candles' scale — same trick every
+// OHLC chart uses so a full-height volume bar doesn't fight the price axis.
+const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {
+  priceFormat: { type: "volume" },
+  priceScaleId: "volume",
+});
+chart.priceScale("volume").applyOptions({
+  scaleMargins: { top: 0.82, bottom: 0 },
+});
+
 new ResizeObserver((entries) => {
   const { width, height } = entries[0].contentRect;
   chart.resize(width, height);
@@ -128,6 +148,7 @@ function renderTimeframeBar(venue) {
     fillBuckets = new Map();
     fillMarkers.setMarkers([]);
     candleSeries.setData([]);
+    volumeSeries.setData([]);
     updateChartLabel();
     poll(); // don't wait for the next tick — the click should feel instant
   });
@@ -159,7 +180,7 @@ function renderCandles(klines) {
   // null means the server confirmed our history is current and sent none.
   if (klines === null || klines === undefined || klines.length === 0) return;
   const last = klines[klines.length - 1];
-  const sig = `${klines.length}|${klines[0].time}|${last.time}|${last.close}|${last.high}|${last.low}`;
+  const sig = `${klines.length}|${klines[0].time}|${last.time}|${last.close}|${last.high}|${last.low}|${last.volume}`;
   if (sig === lastCandleSig) return;
   lastCandleSig = sig;
 
@@ -172,6 +193,11 @@ function renderCandles(klines) {
   // when deeper pagination prepends bars, because logical indices are
   // positional, but that settles once the history has filled in.
   const bar = (k) => ({ time: k.time, open: k.open, high: k.high, low: k.low, close: k.close });
+  const volBar = (k) => ({
+    time: k.time,
+    value: k.volume || 0,
+    color: k.close >= k.open ? BULL_VOL_COLOR : BEAR_VOL_COLOR,
+  });
   const meta = { len: klines.length, first: klines[0].time, last: last.time };
   const sameTail = lastBarsMeta && lastBarsMeta.first === meta.first;
   const inPlace = sameTail && meta.len === lastBarsMeta.len && meta.last === lastBarsMeta.last;
@@ -179,15 +205,19 @@ function renderCandles(klines) {
 
   if (inPlace) {
     candleSeries.update(bar(last));
+    volumeSeries.update(volBar(last));
   } else if (appended) {
     // Finalise the bar that just closed before adding the new one; update()
     // requires non-decreasing times, so the older one has to go first.
     candleSeries.update(bar(klines[klines.length - 2]));
     candleSeries.update(bar(last));
+    volumeSeries.update(volBar(klines[klines.length - 2]));
+    volumeSeries.update(volBar(last));
   } else {
     // History changed shape — deeper pagination arrived, or the bot or
     // interval changed. A full reset is correct here.
     candleSeries.setData(klines.map(bar));
+    volumeSeries.setData(klines.map(volBar));
   }
   lastBarsMeta = meta;
   // Markers anchor to their candle's high/low, so the primitive needs the
@@ -339,6 +369,7 @@ function renderPosition(venue) {
         <div class="row"><span class="label">available</span><span class="val">${fmt(a.available, 2)}</span></div>
         <div class="row"><span class="label">margin used</span><span class="val">${fmt(a.margin_used, 2)}</span></div>
         <div class="row"><span class="label">cross uPnL</span><span class="val ${pnlCls}">${fmt(a.unrealised_pnl, 2)}</span></div>
+        <div class="row"><span class="label">equity (nav)</span><span class="val">${fmt(a.equity, 2)}</span></div>
       </div>
     `);
   } else {
@@ -424,8 +455,16 @@ function resetChartState() {
   fillBuckets = new Map();
   fillMarkers.setMarkers([]);
   candleSeries.setData([]);
+  volumeSeries.setData([]);
+  curveSeries.setData([]);
+  deltaSeries.setData([]);
+  volumeCurveSeries.setData([]);
+  navSeries.setData([]);
   lastCandleSig = "";
   lastLineSig = "";
+  lastCurveSig = "";
+  lastVolumeCurveSig = "";
+  lastNavSig = "";
   priceTags.setTags([]);
 }
 
@@ -590,6 +629,160 @@ function renderStats(stats) {
   `;
 }
 
+// --- Curve (cumulative realised PnL) & Delta (running inventory) ---
+// Same replay as the Performance panel, drawn as a series instead of
+// collapsed to a total. Baseline series so the 0 line reads at a glance —
+// above is green, below is red, exactly like the number it summarises.
+function makeMiniChart(elId) {
+  const el = document.getElementById(elId);
+  const c = LightweightCharts.createChart(el, {
+    layout: { background: { color: "transparent" }, textColor: token("--chart-text"), attributionLogo: false },
+    grid: { vertLines: { visible: false }, horzLines: { visible: false } },
+    timeScale: { visible: false },
+    rightPriceScale: { visible: false },
+    handleScroll: false,
+    handleScale: false,
+    crosshair: { horzLine: { visible: false }, vertLine: { visible: false } },
+  });
+  const series = c.addSeries(LightweightCharts.BaselineSeries, {
+    baseValue: { type: "price", price: 0 },
+    topLineColor: BULL_COLOR,
+    topFillColor1: hexToRgba(BULL_COLOR, 0.28),
+    topFillColor2: hexToRgba(BULL_COLOR, 0.03),
+    bottomLineColor: BEAR_COLOR,
+    bottomFillColor1: hexToRgba(BEAR_COLOR, 0.03),
+    bottomFillColor2: hexToRgba(BEAR_COLOR, 0.28),
+    lineWidth: 1,
+  });
+  new ResizeObserver((entries) => {
+    const { width, height } = entries[0].contentRect;
+    c.resize(width, height);
+  }).observe(el);
+  return series;
+}
+const curveSeries = makeMiniChart("curve-chart");
+const deltaSeries = makeMiniChart("delta-chart");
+const volumeCurveSeries = makeMiniChart("volume-curve-chart");
+const navSeries = makeMiniChart("nav-chart");
+let lastCurveSig = "";
+let lastVolumeCurveSig = "";
+let lastNavSig = "";
+
+// Same same-ts collapse the Curve/Delta blocks need below: a series requires
+// strictly increasing time, and fills can share a timestamp.
+function _byTime(points) {
+  const m = new Map();
+  for (const p of points) m.set(p.ts, p);
+  return [...m.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+function renderVolumeCurve(curve) {
+  // Independent of pnl_unreliable on purpose — see the HTML comment above
+  // #volume-curve-block: cumulative traded notional doesn't depend on FIFO
+  // lot matching, so a window whose realised PnL can't be trusted still has
+  // an honest volume curve.
+  const valEl = document.getElementById("volume-curve-val");
+  const emptyEl = document.getElementById("volume-curve-empty");
+  const block = document.getElementById("volume-curve-block");
+
+  if (!curve || curve.length === 0) {
+    block.style.display = "none";
+    emptyEl.style.display = "";
+    valEl.textContent = "—";
+    lastVolumeCurveSig = "";
+    return;
+  }
+
+  const last = curve[curve.length - 1];
+  const sig = `${curve.length}|${last.ts}|${last.cum_volume_quote}`;
+  if (sig === lastVolumeCurveSig) return;
+  lastVolumeCurveSig = sig;
+
+  block.style.display = "";
+  emptyEl.style.display = "none";
+
+  const points = _byTime(curve);
+  volumeCurveSeries.setData(points.map(([ts, p]) => ({ time: ts, value: p.cum_volume_quote })));
+  valEl.textContent = fmt(last.cum_volume_quote, 2);
+}
+
+function renderCurve(curve) {
+  renderVolumeCurve(curve);
+
+  const panel = document.getElementById("curve-panel");
+  const emptyEl = document.getElementById("curve-empty");
+  const blocks = panel.querySelectorAll(".mini-chart-block:not(#volume-curve-block)");
+  const curveVal = document.getElementById("curve-val");
+  const deltaVal = document.getElementById("delta-val");
+
+  if (!curve || curve.length === 0) {
+    blocks.forEach((b) => (b.style.display = "none"));
+    emptyEl.style.display = "";
+    emptyEl.textContent = "no fills yet";
+    curveVal.textContent = "—";
+    deltaVal.textContent = "—";
+    lastCurveSig = "";
+    return;
+  }
+
+  const last = curve[curve.length - 1];
+  if (last.pnl_unreliable) {
+    // Same refusal as the Performance panel, for the same reason: a replay
+    // that can't defend its total can't defend any point on its curve
+    // either — plotting it anyway would just move the lie into a chart.
+    blocks.forEach((b) => (b.style.display = "none"));
+    emptyEl.style.display = "";
+    emptyEl.innerHTML = `<div class="pnl-blocked-title">unavailable</div><div class="pnl-blocked-why">${last.pnl_unreliable}</div>`;
+    curveVal.textContent = "—";
+    deltaVal.textContent = "—";
+    lastCurveSig = "";
+    return;
+  }
+
+  const sig = `${curve.length}|${last.ts}|${last.realised_net}|${last.inventory_base}`;
+  if (sig === lastCurveSig) return;
+  lastCurveSig = sig;
+
+  blocks.forEach((b) => (b.style.display = ""));
+  emptyEl.style.display = "none";
+
+  const points = _byTime(curve);
+
+  curveSeries.setData(points.map(([ts, p]) => ({ time: ts, value: p.realised_net })));
+  deltaSeries.setData(points.map(([ts, p]) => ({ time: ts, value: p.inventory_base })));
+
+  curveVal.textContent = fmt(last.realised_net, 4);
+  curveVal.className = `val ${last.realised_net >= 0 ? "pnl-pos" : "pnl-neg"}`;
+  deltaVal.textContent = fmt(last.inventory_base, 3);
+  deltaVal.className = `val ${last.inventory_base >= 0 ? "pnl-pos" : "pnl-neg"}`;
+}
+
+function renderNav(navCurve) {
+  const valEl = document.getElementById("nav-val");
+  const emptyEl = document.getElementById("nav-empty");
+  const block = document.querySelector("#nav-panel .mini-chart-block");
+
+  if (!navCurve || navCurve.length === 0) {
+    block.style.display = "none";
+    emptyEl.style.display = "";
+    valEl.textContent = "—";
+    lastNavSig = "";
+    return;
+  }
+
+  const last = navCurve[navCurve.length - 1];
+  const sig = `${navCurve.length}|${last.ts}|${last.equity}`;
+  if (sig === lastNavSig) return;
+  lastNavSig = sig;
+
+  block.style.display = "";
+  emptyEl.style.display = "none";
+
+  const points = _byTime(navCurve);
+  navSeries.setData(points.map(([ts, p]) => ({ time: ts, value: p.equity })));
+  valEl.textContent = fmt(last.equity, 2);
+}
+
 // A bot past the dead threshold keeps its name and its age, and loses every
 // number. The alternative — greying the last values out — still leaves a
 // figure on screen to be read and believed, and a four-day-old position read
@@ -610,7 +803,7 @@ function renderDeadBot(ageS) {
   document.getElementById("position-body").innerHTML =
     dash("qty") + dash("entry") + dash("uPnL") +
     `<div class="account-block">` +
-    dash("available") + dash("margin used") + dash("cross uPnL") +
+    dash("available") + dash("margin used") + dash("cross uPnL") + dash("equity (nav)") +
     `</div>` + stopped;
 
   document.getElementById("stats-window").textContent = "—";
@@ -621,31 +814,62 @@ function renderDeadBot(ageS) {
     stopped;
 
   renderBook(null);
+  renderCurve(null);
+  renderNav(null);
 }
 
-function renderBook(ob) {
+function renderBook(ob, quotes) {
   const asksEl = document.getElementById("book-asks");
   const bidsEl = document.getElementById("book-bids");
+  const asksOffEl = document.getElementById("book-asks-off");
+  const bidsOffEl = document.getElementById("book-bids-off");
   const spreadEl = document.getElementById("book-spread");
   if (!ob) {
     asksEl.innerHTML = "";
     bidsEl.innerHTML = "";
+    asksOffEl.textContent = "";
+    bidsOffEl.textContent = "";
     spreadEl.textContent = "—";
     return;
   }
+  quotes = quotes || [];
+  // Book levels come from the exchange at its own tick precision; quote
+  // prices come from the bot's own order state — comparing them exactly
+  // would miss a match on float noise, so match within half a tick instead.
+  const tol = symbolDecimals !== null ? Math.pow(10, -symbolDecimals) / 2 : 1e-9;
+  const findQuote = (side, price) => quotes.find((q) => q.side === side && Math.abs(q.price - price) <= tol);
+
   // Compact on purpose — the rail is support, the chart is the content.
   const depth = 7;
   const asks = ob.asks.slice(0, depth).reverse();
   const bids = ob.bids.slice(0, depth);
   const maxSize = Math.max(1e-9, ...asks.map((l) => l.size), ...bids.map((l) => l.size));
-  const bookRow = (l, side) => {
+  // bookSide is the quote-side vocabulary ("buy"/"sell"); side is the CSS
+  // class ("bid"/"ask") — same level, two vocabularies to reconcile.
+  const bookRow = (l, side, bookSide) => {
     const pct = Math.min(100, (l.size / maxSize) * 100);
-    return `<div class="book-row ${side}"><div class="depth-bar" style="width:${pct}%"></div><span>${fmtPrice(l.price)}</span><span>${fmt(l.size, 3)}</span></div>`;
+    const own = findQuote(bookSide, l.price);
+    const ownTag = own ? `<span class="own-tag">●${fmt(own.size, 3)}</span>` : "";
+    return `<div class="book-row ${side}${own ? " own" : ""}"><div class="depth-bar" style="width:${pct}%"></div><span>${fmtPrice(l.price)}</span><span>${fmt(l.size, 3)}${ownTag}</span></div>`;
   };
-  asksEl.innerHTML = asks.map((l) => bookRow(l, "ask")).join("");
-  bidsEl.innerHTML = bids.map((l) => bookRow(l, "bid")).join("");
+  asksEl.innerHTML = asks.map((l) => bookRow(l, "ask", "sell")).join("");
+  bidsEl.innerHTML = bids.map((l) => bookRow(l, "bid", "buy")).join("");
   const spreadBps = ob.mid > 0 ? ((ob.best_ask - ob.best_bid) / ob.mid) * 10000 : 0;
   spreadEl.textContent = `spread ${fmtPrice(ob.best_ask - ob.best_bid)} (${fmt(spreadBps, 1)} bps)`;
+
+  // A resting quote past the visible depth still says where the bot is
+  // waiting — worth one line, not worth silently dropping.
+  const offDepthNote = (bookSide, visibleLevels) => {
+    const off = quotes.filter(
+      (q) => q.side === bookSide && !visibleLevels.some((l) => Math.abs(l.price - q.price) <= tol)
+    );
+    if (off.length === 0) return "";
+    const shown = off.slice(0, 3).map((q) => fmtPrice(q.price));
+    const more = off.length > 3 ? ` +${off.length - 3}` : "";
+    return `● ${off.length} more ${bookSide} @ ${shown.join(", ")}${more}`;
+  };
+  asksOffEl.textContent = offDepthNote("sell", asks);
+  bidsOffEl.textContent = offDepthNote("buy", bids);
 }
 
 const bookPanel = document.getElementById("book-panel");
@@ -654,11 +878,12 @@ const bookToggle = document.getElementById("book-toggle");
 // read at a glance, not opened on demand.
 let bookVisible = true;
 let lastOrderbook = null;
+let lastQuotes = [];
 bookToggle.addEventListener("click", () => {
   bookVisible = !bookVisible;
   bookPanel.classList.toggle("visible", bookVisible);
   bookToggle.textContent = bookVisible ? "hide" : "show";
-  renderBook(bookVisible ? lastOrderbook : null); // don't wait for next poll tick
+  renderBook(bookVisible ? lastOrderbook : null, lastQuotes); // don't wait for next poll tick
 });
 
 // --- Freshness tracking ---
@@ -779,6 +1004,7 @@ async function poll() {
       // here also clears the mid out of the chart label, which would
       // otherwise keep quoting a days-old price next to a live symbol name.
       lastOrderbook = dead ? null : venue.orderbook || null;
+      lastQuotes = dead ? [] : venue.quotes || [];
       updatePriceDecimals(lastOrderbook);
       renderTimeframeBar(venue);
       updateChartLabel();
@@ -793,7 +1019,9 @@ async function poll() {
         renderPriceLines(venue);
         renderPosition(venue);
         renderStats(venue.stats);
-        renderBook(bookVisible ? lastOrderbook : null);
+        renderCurve(venue.equity_curve);
+        renderNav(venue.nav_curve);
+        renderBook(bookVisible ? lastOrderbook : null, lastQuotes);
       }
     } else {
       // Nothing discovered at all. The link is healthy, so say so rather
@@ -801,11 +1029,14 @@ async function poll() {
       currentBotKey = null;
       currentSymbol = "";
       lastOrderbook = null;
+      lastQuotes = [];
       botAgeAtPollS = null;
       document.title = "MM Dashboard";
       resetChartState();
       renderPosition({ positions: [], account: null });
       renderStats(null);
+      renderCurve(null);
+      renderNav(null);
       renderBook(null);
       updateChartLabel();
     }

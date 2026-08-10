@@ -132,6 +132,38 @@ def test_fills_filtered_by_symbol_and_venue():
         assert approx(recent[0]["price"], 100.0)
 
 
+def test_equity_curve_reads_position_for_reliability_and_tracks_fills():
+    fills = [
+        {"ts": 1, "symbol": "SOLUSDT", "venue": "bitunix", "side": "buy", "price": 100.0, "size": 1.0, "fee": 0.0},
+        {"ts": 2, "symbol": "SOLUSDT", "venue": "bitunix", "side": "sell", "price": 101.0, "size": 1.0, "fee": 0.0},
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        # Exchange agrees with the replay (flat after both fills) -> reliable.
+        a = _adapter(Path(d), viz={"orderbook": {"mid": 1.0}, "position": {"net_position_base": 0.0}}, fills=fills)
+        curve = a.get_equity_curve()
+        assert [p["ts"] for p in curve] == [1, 2]
+        assert approx(curve[-1]["realised_net"], 1.0)
+        assert curve[-1]["inventory_base"] == 0.0
+        assert curve[-1]["pnl_unreliable"] is None
+
+
+def test_equity_curve_flags_hedge_mode_same_as_get_stats():
+    fills = [
+        {"ts": 1, "symbol": "SOLUSDT", "venue": "bitunix", "side": "buy", "price": 100.0, "size": 1.0, "fee": 0.0},
+    ]
+    viz = {
+        "orderbook": {"mid": 1.0},
+        "position_long": {"qty_base": 1.0},
+        "position_short": {"qty_base": 1.0},
+    }
+    with tempfile.TemporaryDirectory() as d:
+        a = _adapter(Path(d), viz=viz, fills=fills)
+        stats = a.get_stats()
+        curve = a.get_equity_curve()
+        assert stats["pnl_unreliable"] is not None
+        assert curve[-1]["pnl_unreliable"] == stats["pnl_unreliable"]
+
+
 def test_fills_incremental_read_only_sees_new_lines():
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)

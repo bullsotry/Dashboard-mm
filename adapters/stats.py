@@ -55,6 +55,65 @@ def _empty() -> Stats:
     }
 
 
+def _replay(ordered: list[Fill]):
+    """The FIFO round-trip matching engine, run once. Yields one entry per
+    valid fill, in order, each carrying the effect that fill had — both
+    `compute_stats` (which only wants the totals) and `equity_curve` (which
+    wants the running series) are built on this single pass, so the matching
+    rules exist in exactly one place.
+
+    Signed inventory is kept as a FIFO queue of [qty, price] lots: positive
+    qty means long lots, negative means short lots, and the queue never
+    holds both signs at once because any opposite-side fill matches before
+    it opens.
+    """
+    lots: deque[list[float]] = deque()
+    for f in ordered:
+        side = (f.get("side") or "").lower()
+        if side not in ("buy", "sell"):
+            continue
+        price = float(f.get("price") or 0.0)
+        size = float(f.get("size") or 0.0)
+        if size <= 0 or price <= 0:
+            continue
+
+        fee = float(f.get("fee") or 0.0)
+        realised_delta = 0.0
+        signed = size if side == "buy" else -size
+        remaining = signed
+
+        # Close against opposite-sign lots first, realising as we go.
+        while abs(remaining) > _EPS and lots and (lots[0][0] > 0) != (remaining > 0):
+            lot_qty, lot_price = lots[0]
+            matched = min(abs(remaining), abs(lot_qty))
+            # Long lot closed by a sell earns (exit - entry); short lot
+            # closed by a buy earns (entry - exit). The sign of lot_qty
+            # collapses both into one expression.
+            direction = 1.0 if lot_qty > 0 else -1.0
+            realised_delta += direction * (price - lot_price) * matched
+
+            lot_qty -= direction * matched
+            remaining += direction * matched
+            if abs(lot_qty) <= _EPS:
+                lots.popleft()
+            else:
+                lots[0][0] = lot_qty
+
+        # Whatever is left opens (or extends) a lot on this side.
+        if abs(remaining) > _EPS:
+            lots.append([remaining, price])
+
+        yield {
+            "ts": f["ts"],
+            "side": side,
+            "price": price,
+            "size": size,
+            "fee": fee,
+            "realised_delta": realised_delta,
+            "inventory_base": sum(q for q, _ in lots),
+        }
+
+
 def compute_stats(
     fills: list[Fill],
     net_position_base: float | None = None,
@@ -68,63 +127,34 @@ def compute_stats(
 
     ordered = sorted(fills, key=lambda f: f["ts"])
 
-    # Signed inventory as a FIFO queue of [qty, price] lots. Positive qty
-    # means long lots, negative means short lots; the queue never holds both
-    # signs at once because any opposite-side fill matches before it opens.
-    lots: deque[list[float]] = deque()
     realised = 0.0
     fees = 0.0
     n_buys = n_sells = 0
     volume_quote = 0.0
     buy_base = buy_notional = 0.0
     sell_base = sell_notional = 0.0
+    inventory_base = 0.0
+    n_fills = 0
 
-    for f in ordered:
-        side = (f.get("side") or "").lower()
-        if side not in ("buy", "sell"):
-            continue
-        price = float(f.get("price") or 0.0)
-        size = float(f.get("size") or 0.0)
-        if size <= 0 or price <= 0:
-            continue
-
-        fees += float(f.get("fee") or 0.0)
-        volume_quote += price * size
-        if side == "buy":
+    for step in _replay(ordered):
+        n_fills += 1
+        fees += step["fee"]
+        realised += step["realised_delta"]
+        inventory_base = step["inventory_base"]
+        volume_quote += step["price"] * step["size"]
+        if step["side"] == "buy":
             n_buys += 1
-            buy_base += size
-            buy_notional += price * size
+            buy_base += step["size"]
+            buy_notional += step["price"] * step["size"]
         else:
             n_sells += 1
-            sell_base += size
-            sell_notional += price * size
+            sell_base += step["size"]
+            sell_notional += step["price"] * step["size"]
 
-        signed = size if side == "buy" else -size
-        remaining = signed
-
-        # Close against opposite-sign lots first, realising as we go.
-        while abs(remaining) > _EPS and lots and (lots[0][0] > 0) != (remaining > 0):
-            lot_qty, lot_price = lots[0]
-            matched = min(abs(remaining), abs(lot_qty))
-            # Long lot closed by a sell earns (exit - entry); short lot
-            # closed by a buy earns (entry - exit). The sign of lot_qty
-            # collapses both into one expression.
-            direction = 1.0 if lot_qty > 0 else -1.0
-            realised += direction * (price - lot_price) * matched
-
-            lot_qty -= direction * matched
-            remaining += direction * matched
-            if abs(lot_qty) <= _EPS:
-                lots.popleft()
-            else:
-                lots[0][0] = lot_qty
-
-        # Whatever is left opens (or extends) a lot on this side.
-        if abs(remaining) > _EPS:
-            lots.append([remaining, price])
-
+    # Bounds of the raw window, not of the valid rows within it — matches
+    # the pre-refactor behaviour: a window that is entirely malformed fills
+    # still reports the span it covered, just with every other figure at 0.
     span_s = ordered[-1]["ts"] - ordered[0]["ts"]
-    n_fills = n_buys + n_sells
     fills_per_hour = (n_fills / span_s * 3600.0) if span_s > 0 else 0.0
 
     capture_bps = None
@@ -134,8 +164,6 @@ def compute_stats(
         mid = (avg_buy + avg_sell) / 2.0
         if mid > 0:
             capture_bps = (avg_sell - avg_buy) / mid * 10000.0
-
-    inventory_base = sum(q for q, _ in lots)
 
     return {
         "span_s": span_s,
@@ -151,6 +179,52 @@ def compute_stats(
         "capture_bps": capture_bps,
         "pnl_unreliable": _reliability(inventory_base, net_position_base, hedge_mode),
     }
+
+
+def equity_curve(
+    fills: list[Fill],
+    net_position_base: float | None = None,
+    hedge_mode: bool = False,
+) -> list[dict]:
+    """The same FIFO replay as `compute_stats`, but returning the running
+    series instead of only the final totals — one point per valid fill:
+    `ts`, cumulative `realised_net`, and `inventory_base` at that point.
+
+    This is what a Curve (cumulative realised PnL), a Delta (inventory over
+    time) and a Volume curve (cumulative traded notional) panel are built
+    from. `cum_volume_quote` is a plain running sum of price*size per fill —
+    unlike realised PnL and inventory, it does not depend on FIFO lot
+    matching, so it stays correct even on a window `_reliability` below
+    flags as unreliable; it still carries the same `pnl_unreliable` verdict
+    on every point purely so callers get one flag per point instead of
+    juggling two.
+    """
+    ordered = sorted(fills, key=lambda f: f["ts"])
+
+    out = []
+    cum_realised = 0.0
+    cum_fees = 0.0
+    cum_volume_quote = 0.0
+    for step in _replay(ordered):
+        cum_realised += step["realised_delta"]
+        cum_fees += step["fee"]
+        cum_volume_quote += step["price"] * step["size"]
+        out.append(
+            {
+                "ts": step["ts"],
+                "realised_net": cum_realised - cum_fees,
+                "inventory_base": step["inventory_base"],
+                "cum_volume_quote": cum_volume_quote,
+            }
+        )
+
+    # Same verdict `compute_stats` would reach on this window (hedge mode
+    # doesn't depend on the replay's outcome; the inventory-gap check needs
+    # the final inventory, which only exists once the loop above has run).
+    final_inventory = out[-1]["inventory_base"] if out else 0.0
+    unreliable = _reliability(final_inventory, net_position_base, hedge_mode)
+
+    return [{**p, "pnl_unreliable": unreliable} for p in out]
 
 
 # Below this, a base-units gap between the ledger and the exchange is treated

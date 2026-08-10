@@ -92,5 +92,9 @@ class CoinbaseAccountAdapter:
             "available": available,
             "margin_used": held,
             "unrealised_pnl": 0.0,
+            # Quote-currency NAV only — same narrowing as the rest of this
+            # adapter's docstring: a spot base-asset holding doesn't show up
+            # here, only the quote balance free or held by open orders.
+            "equity": available + held,
         }
         return self._cached

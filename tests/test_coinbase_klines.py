@@ -26,9 +26,24 @@ def test_interval_seconds_known_and_unknown():
 
 
 def test_parse_rows_reads_string_fields():
+    payload = {
+        "candles": [
+            {"start": "1700000000", "open": "1.0", "high": "2.0", "low": "0.5", "close": "1.5", "volume": "3.75"}
+        ]
+    }
+    rows = _parse_rows(payload)
+    assert rows == [
+        {"time": 1700000000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 3.75}
+    ]
+
+
+def test_parse_rows_missing_volume_defaults_to_zero():
+    # Unlike OKX's positional row, Coinbase's is a dict keyed by field name —
+    # a genuinely absent "volume" key is distinguishable from a malformed
+    # row, so it defaults rather than dropping the whole bar.
     payload = {"candles": [{"start": "1700000000", "open": "1.0", "high": "2.0", "low": "0.5", "close": "1.5"}]}
     rows = _parse_rows(payload)
-    assert rows == [{"time": 1700000000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5}]
+    assert rows == [{"time": 1700000000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 0.0}]
 
 
 def test_parse_rows_skips_rows_missing_fields():

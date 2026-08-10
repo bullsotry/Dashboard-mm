@@ -11,6 +11,15 @@ timestamp) is OKX's documented v5 auth, ported from v17mm OKX's own
 okx_client.py — that client's signing has been running against this same
 account since 2026-08-05, so this is a known-working scheme, not a fresh
 implementation guessed from docs alone.
+
+The request itself is *not* sent through `requests`/urllib3, for the same
+reason the bot's own client isn't: OKX enforces its IP allow-list against a
+specific IPv4 address, but on a dual-stack host plain HTTPSConnection lets
+the OS pick IPv6, which OKX then rejects with a misleading "API key doesn't
+exist" (50119) even though the IPv4 address is correctly whitelisted —
+confirmed live on this dashboard's own Tokyo VPS. `_IPv4HTTPSConnection` is
+the same fix v17mm OKX's okx_client.py uses, ported here rather than
+imported so this adapter has no dependency on the bot's codebase.
 """
 
 from __future__ import annotations
@@ -18,14 +27,16 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
+import json
+import socket
+import ssl
 import time
 from datetime import datetime, timezone
 
-import requests
-
 from .base import Account
 
-_BASE_URL = "https://www.okx.com"
+_HOST = "www.okx.com"
 _BALANCE_PATH = "/api/v5/account/balance"
 
 
@@ -38,6 +49,42 @@ def _sign(secret_key: str, timestamp: str, method: str, request_path: str, body:
     prehash = f"{timestamp}{method.upper()}{request_path}{body}"
     digest = hmac.new(secret_key.encode("utf-8"), prehash.encode("utf-8"), hashlib.sha256).digest()
     return base64.b64encode(digest).decode("utf-8")
+
+
+class _IPv4HTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that resolves and connects using AF_INET only. See
+    module docstring — this is what makes OKX's IP allow-list actually see
+    the whitelisted address on a dual-stack host."""
+
+    def connect(self):
+        err: OSError | None = None
+        for family, socktype, proto, _, sockaddr in socket.getaddrinfo(
+            self.host, self.port, socket.AF_INET, socket.SOCK_STREAM
+        ):
+            try:
+                sock = socket.socket(family, socktype, proto)
+                sock.settimeout(self.timeout)
+                sock.connect(sockaddr)
+                self.sock = sock
+                break
+            except OSError as e:
+                err = e
+                continue
+        else:
+            raise OSError(f"IPv4 connection to {self.host}:{self.port} failed") from err
+        if self._tunnel_host:
+            self._tunnel()
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+def _get_ipv4(path: str, headers: dict, timeout_s: float) -> tuple[int, bytes]:
+    conn = _IPv4HTTPSConnection(_HOST, 443, timeout=timeout_s, context=ssl.create_default_context())
+    try:
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        return resp.status, resp.read()
+    finally:
+        conn.close()
 
 
 class OkxAccountAdapter:
@@ -75,10 +122,11 @@ class OkxAccountAdapter:
             "Content-Type": "application/json",
         }
         try:
-            resp = requests.get(_BASE_URL + request_path, headers=headers, timeout=5.0)
-            resp.raise_for_status()
-            payload = resp.json()
-        except (requests.RequestException, ValueError):
+            status, body = _get_ipv4(request_path, headers, timeout_s=5.0)
+            if status != 200:
+                return self._cached
+            payload = json.loads(body)
+        except (OSError, ValueError):
             return self._cached  # keep last-known-good rather than blanking the panel
 
         rows = payload.get("data") if isinstance(payload, dict) else None
@@ -112,5 +160,6 @@ class OkxAccountAdapter:
             "available": available,
             "margin_used": margin_used,
             "unrealised_pnl": upnl,
+            "equity": equity,
         }
         return self._cached

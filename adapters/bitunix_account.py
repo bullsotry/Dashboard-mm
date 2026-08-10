@@ -86,5 +86,9 @@ class BitunixAccountAdapter:
             "available": available,
             "margin_used": margin_used,
             "unrealised_pnl": cross_upnl,
+            # Bitunix doesn't expose a single equity field (unlike OKX's
+            # "eq") — derived the same way OKX's own margin_used is derived,
+            # so the two venues' NAV panels agree on what the number means.
+            "equity": available + margin_used + cross_upnl,
         }
         return self._cached

@@ -296,11 +296,42 @@
   .book-row.ask .depth-bar { background: rgba(250, 82, 82, 0.16); }
   .book-row.bid { color: var(--bull); }
   .book-row.bid .depth-bar { background: rgba(14, 203, 129, 0.16); }
+  /* Where the bot itself sits in the market it's shown next to. Amber, not
+     bull/bear — this isn't a market signal, it's "you are here". */
+  .book-row.own { border-left: 2px solid var(--accent); padding-left: 2px; }
+  .book-row .own-tag { color: var(--accent); margin-left: 4px; }
+  /* A resting quote outside the displayed top-N levels still matters — it's
+     still where the bot is waiting — so it gets a one-line mention instead
+     of silently vanishing past the depth cutoff. */
+  .own-off-depth {
+    font-size: 10px; color: var(--accent); font-family: ui-monospace, Menlo, monospace;
+    padding: 1px 4px;
+  }
+  .own-off-depth:empty { display: none; }
   .spread-line {
     text-align: center; font-size: 10.5px; color: var(--text-dim);
     padding: 3px 0; border-top: 1px solid var(--divider); border-bottom: 1px solid var(--divider);
     margin: 3px 0 4px 0;
   }
+
+  /* Curve (cumulative realised PnL), Delta (running inventory) and Volume
+     (cumulative traded notional) — same replay as the Performance panel,
+     shown as a series instead of a single number. Stacked in one panel:
+     each is support for the figure already printed above it, not a
+     destination of its own, so none needs the weight of a full chart. */
+  .mini-chart-block + .mini-chart-block,
+  /* #volume-curve-block isn't adjacent to the block above it in the DOM (an
+     empty-note sits between them, toggled independently — see the panel
+     markup), so the sibling selector above misses it; give it the same
+     divider explicitly. */
+  #volume-curve-block { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--divider); }
+  .mini-chart-label {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
+    margin-bottom: 2px;
+  }
+  .mini-chart-label .val { font-size: 11px; font-family: ui-monospace, Menlo, monospace; text-transform: none; letter-spacing: 0; }
+  .mini-chart { height: 60px; }
 
   /* Below ~900px the fixed 300px rail leaves the chart unusably narrow, so
      the panels stack under it instead of beside it. */
@@ -348,9 +379,11 @@
       <h2>Order Book <button id="book-toggle">hide</button></h2>
       <div id="book-panel" class="visible">
         <div class="book-header"><span>Price</span><span>Size</span></div>
+        <div class="own-off-depth" id="book-asks-off"></div>
         <div class="book-side" id="book-asks"></div>
         <div class="spread-line" id="book-spread">—</div>
         <div class="book-side" id="book-bids"></div>
+        <div class="own-off-depth" id="book-bids-off"></div>
       </div>
     </div>
 
@@ -362,6 +395,37 @@
     <div class="panel" id="stats-panel">
       <h2>Performance <span class="window-note" id="stats-window">—</span></h2>
       <div id="stats-body"><div class="empty-note">no fills yet</div></div>
+    </div>
+
+    <div class="panel" id="curve-panel">
+      <h2>Curve, Delta &amp; Volume</h2>
+      <div class="mini-chart-block">
+        <div class="mini-chart-label"><span>realised pnl (cum.)</span><span class="val" id="curve-val">—</span></div>
+        <div class="mini-chart" id="curve-chart"></div>
+      </div>
+      <div class="mini-chart-block">
+        <div class="mini-chart-label"><span>inventory (base)</span><span class="val" id="delta-val">—</span></div>
+        <div class="mini-chart" id="delta-chart"></div>
+      </div>
+      <div class="empty-note" id="curve-empty">no fills yet</div>
+      <!-- Volume is a plain running sum of price*size, so unlike the two
+           blocks above it stays honest even on a window curve-empty is
+           hiding for pnl_unreliable — it gets its own block, outside the
+           blocks curve-empty toggles, and its own empty state. -->
+      <div class="mini-chart-block" id="volume-curve-block">
+        <div class="mini-chart-label"><span>volume traded (cum., quote)</span><span class="val" id="volume-curve-val">—</span></div>
+        <div class="mini-chart" id="volume-curve-chart"></div>
+      </div>
+      <div class="empty-note" id="volume-curve-empty" style="display:none;">no fills yet</div>
+    </div>
+
+    <div class="panel" id="nav-panel">
+      <h2>NAV</h2>
+      <div class="mini-chart-block">
+        <div class="mini-chart-label"><span>account equity</span><span class="val" id="nav-val">—</span></div>
+        <div class="mini-chart" id="nav-chart"></div>
+      </div>
+      <div class="empty-note" id="nav-empty">account margin unavailable</div>
     </div>
 
   </div>

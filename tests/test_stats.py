@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from adapters.stats import compute_stats  # noqa: E402
+from adapters.stats import compute_stats, equity_curve  # noqa: E402
 
 
 def f(ts, side, price, size, fee=0.0):
@@ -177,6 +177,66 @@ def test_unknown_position_is_not_an_accusation():
     # evidence against it. Silence, not a warning.
     s = compute_stats([f(1, "buy", 100.0, 2.0)], net_position_base=None)
     assert s["pnl_unreliable"] is None
+
+
+def test_equity_curve_matches_compute_stats_final_point():
+    # Buy 1 @ 100 (fee 0.1), sell 1 @ 101 (fee 0.1) -> realised 1.0, net 0.8.
+    fills = [f(1, "buy", 100.0, 1.0, fee=0.1), f(2, "sell", 101.0, 1.0, fee=0.1)]
+    stats = compute_stats(fills)
+    curve = equity_curve(fills)
+    assert len(curve) == 2
+    assert curve[0] == {
+        "ts": 1,
+        "realised_net": -0.1,
+        "inventory_base": 1.0,
+        "cum_volume_quote": 100.0,
+        "pnl_unreliable": None,
+    }
+    assert approx(curve[-1]["realised_net"], stats["realised_net"])
+    assert approx(curve[-1]["inventory_base"], stats["inventory_base"])
+    assert approx(curve[-1]["cum_volume_quote"], stats["volume_quote"])
+
+
+def test_equity_curve_volume_is_a_running_sum_of_notional():
+    # 100*1 + 101*1 = 100, then 201 cumulative -- never resets, never nets
+    # buys against sells the way realised PnL does.
+    fills = [f(1, "buy", 100.0, 1.0), f(2, "sell", 101.0, 1.0), f(3, "buy", 50.0, 2.0)]
+    curve = equity_curve(fills)
+    assert approx(curve[0]["cum_volume_quote"], 100.0)
+    assert approx(curve[1]["cum_volume_quote"], 201.0)
+    assert approx(curve[2]["cum_volume_quote"], 301.0)
+
+
+def test_equity_curve_volume_stays_defendable_when_pnl_is_not():
+    # Same hedge-mode case that flags realised PnL as unreliable below --
+    # the volume figure must not be blanked or zeroed along with it, because
+    # it doesn't depend on the FIFO replay that hedge mode breaks.
+    fills = [f(1, "buy", 100.0, 2.0), f(2, "sell", 101.0, 1.0)]
+    curve = equity_curve(fills, net_position_base=1.0, hedge_mode=True)
+    assert curve[-1]["pnl_unreliable"] is not None
+    assert approx(curve[-1]["cum_volume_quote"], 200.0 + 101.0)
+
+
+def test_equity_curve_is_monotonic_in_time_and_cumulative():
+    fills = [f(3, "buy", 100.0, 1.0), f(1, "buy", 99.0, 1.0), f(2, "sell", 101.0, 1.0)]
+    curve = equity_curve(fills)  # ordered by ts regardless of input order
+    assert [p["ts"] for p in curve] == [1, 2, 3]
+    # buy@99 -> flat until sell@101 closes it (+2.0) -> buy@100 opens fresh
+    assert approx(curve[1]["realised_net"], 2.0)
+    assert approx(curve[2]["realised_net"], 2.0)  # unrealised open lot doesn't move it
+    assert curve[2]["inventory_base"] == 1.0
+
+
+def test_equity_curve_carries_the_same_unreliable_verdict_as_compute_stats():
+    fills = [f(1, "buy", 100.0, 2.0), f(2, "sell", 101.0, 1.0)]
+    stats = compute_stats(fills, net_position_base=1.0, hedge_mode=True)
+    curve = equity_curve(fills, net_position_base=1.0, hedge_mode=True)
+    assert curve[-1]["pnl_unreliable"] == stats["pnl_unreliable"]
+    assert all(p["pnl_unreliable"] == stats["pnl_unreliable"] for p in curve)
+
+
+def test_equity_curve_empty_fills():
+    assert equity_curve([]) == []
 
 
 if __name__ == "__main__":

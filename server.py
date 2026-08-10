@@ -42,6 +42,14 @@ _last_scan_ts = 0.0
 # basis panel shows every discovered pair, not just the active one.
 _basis_history: dict[str, deque] = {}
 
+# Account equity, one sample per bot per poll — the NAV curve, unlike the
+# realised-PnL Curve, has no source-of-truth history to replay from the fill
+# ledger (equity depends on venue-side margin/collateral too, not just this
+# bot's own fills), so a sampled series while the dashboard is open is the
+# only history there is. Same "no active poller, no history" property as
+# _basis_history above.
+_nav_history: dict[str, deque] = {}
+
 # Per-bot live/warn/dead transition log, and the classification each bot was
 # last seen in (so a transition is only recorded on an actual change, not on
 # every background tick). Written only by _record_transitions, running on
@@ -151,6 +159,7 @@ def _refresh(force: bool = False) -> dict[str, DiscoveredBot]:
             _state_adapters.pop(key, None)
             _kline_adapters.pop(key, None)
             _account_adapters.pop(key, None)
+            _nav_history.pop(key, None)
 
         _bots.clear()
         _bots.update(found)
@@ -225,6 +234,9 @@ def _bot_summary(key: str, bot_info: DiscoveredBot) -> dict:
     stats = adapter.get_stats()
     account_adapter = _account_adapters.get(key)
     account = account_adapter.get_account() if account_adapter else None
+    if account is not None:
+        hist = _nav_history.setdefault(key, deque(maxlen=config.NAV_HISTORY_LEN))
+        hist.append({"ts": time.time(), "equity": account["equity"]})
     return {
         "key": key,
         "label": bot_info.label,
@@ -243,12 +255,17 @@ def _bot_summary(key: str, bot_info: DiscoveredBot) -> dict:
 
 def _klines_sig(candles: list) -> str:
     """Cheap identity for a candle list. Only the newest bar mutates in place
-    (the one still forming), so its OHLC plus the list bounds is enough to
-    tell "same history" from "something moved"."""
+    (the one still forming), so its OHLC plus volume plus the list bounds is
+    enough to tell "same history" from "something moved". Volume is included
+    because a trade can land inside the forming bar without moving OHLC (same
+    price as the last trade) — without it, the sig would miss that tick."""
     if not candles:
         return "0"
     last = candles[-1]
-    return f'{len(candles)}|{candles[0]["time"]}|{last["time"]}|{last["close"]}|{last["high"]}|{last["low"]}'
+    return (
+        f'{len(candles)}|{candles[0]["time"]}|{last["time"]}|'
+        f'{last["close"]}|{last["high"]}|{last["low"]}|{last.get("volume")}'
+    )
 
 
 @app.get("/snapshot")
@@ -313,6 +330,11 @@ def snapshot(
         "fills": state.get_recent_fills(),
         "quotes": state.get_quotes(),
         "stats": state.get_stats(),
+        # Same FIFO replay as `stats`, kept as a per-fill series instead of
+        # collapsed to a total — feeds the Curve (cumulative realised PnL),
+        # Delta (running inventory) and Volume (cumulative traded notional)
+        # panels.
+        "equity_curve": state.get_equity_curve(),
         # The bot's own heartbeat. Distinct from server_ts below: this server
         # answers happily while the bot it watches is dead, and the frontend
         # must be able to tell those two apart.
@@ -325,7 +347,10 @@ def snapshot(
         "supported_intervals": supported,
     }
 
+    # Every bot's summary is (re)built before this line, so the selected
+    # bot's own account sample has already landed in _nav_history this poll.
     bot_list = [_bot_summary(k, found[k]) for k in sorted(found)]
+    venue["nav_curve"] = list(_nav_history.get(bot, []))
 
     # Server clock, so the frontend measures bot staleness against the same
     # clock that produced source_ts instead of against the browser's, which

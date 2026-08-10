@@ -75,6 +75,12 @@ class Account(TypedDict):
     available: float
     margin_used: float
     unrealised_pnl: float
+    # Net asset value: available + margin_used + unrealised_pnl. OKX reports
+    # this directly ("eq"); Bitunix and Coinbase don't expose an equivalent
+    # field, so their adapters derive it the same way margin_used is already
+    # derived on OKX — one formula, three venues, so a NAV panel reads the
+    # same regardless of which adapter fed it.
+    equity: float
 
 
 class Candle(TypedDict):
@@ -83,6 +89,7 @@ class Candle(TypedDict):
     high: float
     low: float
     close: float
+    volume: float  # base-asset volume traded during the bar
 
 
 class VenueAdapter(Protocol):

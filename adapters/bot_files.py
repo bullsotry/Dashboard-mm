@@ -19,7 +19,7 @@ from collections import deque
 from pathlib import Path
 
 from .base import Account, Fill, OrderBook, Position, Quote, Stats
-from .stats import compute_stats
+from .stats import compute_stats, equity_curve
 
 
 class BotStateAdapter:
@@ -168,11 +168,14 @@ class BotStateAdapter:
         # published files. server.py merges the two at the route level.
         return None
 
-    def get_stats(self) -> Stats:
-        self._poll_fills()
-        # The exchange's own position is what makes the replay checkable: if
-        # replaying the ledger lands somewhere else, the ledger is missing
-        # history and the realised PnL built on it is fiction.
+    def _net_and_hedge(self) -> tuple[float | None, bool]:
+        """The exchange's own position, read fresh from the viz file. This is
+        what makes a fills replay checkable: if replaying the ledger lands
+        somewhere else, the ledger is missing history and whatever the
+        replay claims is fiction. Shared by every replay-based reader
+        (`get_stats`, `get_equity_curve`) so they can never disagree about
+        what the exchange currently holds.
+        """
         data = self._read_viz() or {}
         net = None
         pos = data.get("position")
@@ -191,7 +194,22 @@ class BotStateAdapter:
             float((data.get("position_long") or {}).get("qty_base") or 0.0) > 0
             and float((data.get("position_short") or {}).get("qty_base") or 0.0) > 0
         )
+        return net, hedge
+
+    def get_stats(self) -> Stats:
+        self._poll_fills()
+        net, hedge = self._net_and_hedge()
         return compute_stats(list(self._fills), net_position_base=net, hedge_mode=hedge)
+
+    def get_equity_curve(self) -> list[dict]:
+        """Cumulative realised PnL and running inventory, one point per
+        fill — the same replay `get_stats` runs, kept as a series instead of
+        collapsed to a total. See `adapters/stats.py:equity_curve` for what
+        each point means and why `pnl_unreliable` rides along on all of
+        them."""
+        self._poll_fills()
+        net, hedge = self._net_and_hedge()
+        return equity_curve(list(self._fills), net_position_base=net, hedge_mode=hedge)
 
     def get_first_fill_ts(self) -> float | None:
         """When the bot's recorded activity starts, as far as this window

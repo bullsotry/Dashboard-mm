@@ -46,6 +46,11 @@ FILLS_MAXLEN = int(os.environ.get("FILLS_MAXLEN", "2000"))
 # actually moving, not just its instantaneous value.
 BASIS_HISTORY_LEN = int(os.environ.get("BASIS_HISTORY_LEN", "240"))
 
+# Same idea for the NAV (account equity) sparkline: one sample per snapshot
+# poll per bot, kept across polls so the panel isn't empty on the first
+# render after switching to a bot that's had this dashboard open a while.
+NAV_HISTORY_LEN = int(os.environ.get("NAV_HISTORY_LEN", "240"))
+
 # Freshness thresholds a bot's state is judged against, in seconds. Mirrored
 # in static/app.js as BOT_STALE_MS/BOT_DEAD_MS (milliseconds there) — kept in
 # sync by hand, not shared code, because one is Python judging a background

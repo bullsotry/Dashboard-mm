@@ -59,15 +59,30 @@ def test_interval_seconds():
 
 
 def test_parse_rows_converts_ms_to_s_and_types():
-    payload = {"data": [["1700000000000", "1.0", "2.0", "0.5", "1.5"]]}
+    payload = {"data": [["1700000000000", "1.0", "2.0", "0.5", "1.5", "10.25"]]}
     rows = _parse_rows(payload)
-    assert rows == [{"time": 1700000000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5}]
+    assert rows == [
+        {"time": 1700000000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.25}
+    ]
 
 
 def test_parse_rows_skips_malformed_entries():
-    payload = {"data": [["not-a-number", "1", "2", "3", "4"], ["1700000000000", "1", "2", "3", "4"]]}
+    payload = {
+        "data": [
+            ["not-a-number", "1", "2", "3", "4", "5"],
+            ["1700000000000", "1", "2", "3", "4", "5"],
+        ]
+    }
     rows = _parse_rows(payload)
     assert len(rows) == 1
+
+
+def test_parse_rows_missing_volume_index_skips_row():
+    # A row shorter than expected (no volume column) is malformed, not
+    # "volume unknown" — dropped like any other truncated row, not silently
+    # defaulted to 0, which would understate a real bar's volume.
+    payload = {"data": [["1700000000000", "1.0", "2.0", "0.5", "1.5"]]}
+    assert _parse_rows(payload) == []
 
 
 def test_parse_rows_non_dict_payload():

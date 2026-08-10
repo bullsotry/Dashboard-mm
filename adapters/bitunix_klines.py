@@ -78,6 +78,12 @@ def _parse_rows(payload) -> list[Candle]:
                     "high": float(row["high"]),
                     "low": float(row["low"]),
                     "close": float(row["close"]),
+                    # Bitunix's field names are swapped from what they say:
+                    # verified against fapi.bitunix.com/.../kline live,
+                    # "quoteVol" * close ≈ "baseVol" (e.g. ETHUSDT 1m:
+                    # 203.739 * 1915.18 ≈ 390,197 vs baseVol 390,111.49).
+                    # So quoteVol is actually the base-asset amount.
+                    "volume": float(row.get("quoteVol") or 0.0),
                 }
             )
         except (KeyError, TypeError, ValueError):

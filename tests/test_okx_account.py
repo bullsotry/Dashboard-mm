@@ -49,6 +49,8 @@ def test_get_account_parses_balance_and_derives_margin_used(monkeypatch):
     assert approx(acc["unrealised_pnl"], 5.0)
     # margin_used = eq - availEq - upl = 100 - 60 - 5 = 35
     assert approx(acc["margin_used"], 35.0)
+    # equity is OKX's own "eq" field, reported as-is, not re-derived.
+    assert approx(acc["equity"], 100.0)
 
 
 def test_get_account_falls_back_to_first_detail_when_margin_coin_absent(monkeypatch):

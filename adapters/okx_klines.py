@@ -112,6 +112,7 @@ def _parse_rows(payload) -> list[Candle]:
                     "high": float(row[2]),
                     "low": float(row[3]),
                     "close": float(row[4]),
+                    "volume": float(row[5]),  # base-ccy volume; row[6] is quote-ccy
                 }
             )
         except (IndexError, TypeError, ValueError):

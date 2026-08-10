@@ -75,6 +75,7 @@ def _parse_rows(payload) -> list[Candle]:
                     "high": float(row["high"]),
                     "low": float(row["low"]),
                     "close": float(row["close"]),
+                    "volume": float(row.get("volume") or 0.0),
                 }
             )
         except (KeyError, TypeError, ValueError):
