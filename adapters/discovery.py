@@ -35,7 +35,13 @@ class DiscoveredBot:
     exchange: str
     symbol: str
     viz_path: Path
-    fills_path: Path | None
+    # Every ledger matched by FILLS_GLOBS, not just one. A fleet commonly
+    # splits fills across several concurrently-live files (one tracker per
+    # venue, e.g. fills.jsonl for bitunix+coinbase and fills_okx.jsonl for
+    # OKX) — each bot's own venue/symbol filter in BotStateAdapter picks its
+    # rows back out, so tailing all of them is safe and picking only the
+    # most-recently-written one silently starves whichever ledger isn't it.
+    fills_paths: tuple[Path, ...]
 
     @property
     def label(self) -> str:
@@ -83,23 +89,32 @@ def _read_identity(path: Path) -> tuple[str, str] | None:
     return exchange, symbol
 
 
-def _pick_fills_path(candidates: list[str]) -> Path | None:
-    existing = [Path(p) for p in candidates if os.path.isfile(p)]
-    if not existing:
-        return None
-    # Most recently written wins: if several ledgers exist, the live one is
-    # the one still being appended to.
-    return max(existing, key=lambda p: p.stat().st_mtime)
+def _pick_fills_paths(candidates: list[str]) -> tuple[Path, ...]:
+    # All of them, not just the freshest — see the fills_paths docstring on
+    # DiscoveredBot for why picking a single winner drops other bots' fills.
+    existing = {Path(p) for p in candidates if os.path.isfile(p)}
+    return tuple(sorted(existing))
 
 
-def discover(viz_globs: list[str], fills_globs: list[str]) -> list[DiscoveredBot]:
-    fills_path = _pick_fills_path(
+def discover(
+    viz_globs: list[str],
+    fills_globs: list[str],
+    exclude: list[str] | None = None,
+) -> list[DiscoveredBot]:
+    fills_paths = _pick_fills_paths(
         [p for pattern in fills_globs for p in glob.glob(pattern)]
     )
 
+    exclude = exclude or []
     seen: dict[str, DiscoveredBot] = {}
     for pattern in viz_globs:
         for raw in glob.glob(pattern):
+            # A shadow/paper copy publishes the same identity as the bot it
+            # mirrors, so it collides on the same key and the mtime tiebreak
+            # below silently hands the key over the moment the live bot
+            # stops. Excluded by path, before identity is even read.
+            if any(frag in raw for frag in exclude):
+                continue
             path = Path(raw)
             identity = _read_identity(path)
             if identity is None:
@@ -119,7 +134,7 @@ def discover(viz_globs: list[str], fills_globs: list[str]) -> list[DiscoveredBot
                 exchange=exchange,
                 symbol=symbol,
                 viz_path=path,
-                fills_path=fills_path,
+                fills_paths=fills_paths,
             )
 
     # Stable ordering so the frontend's tab order doesn't shuffle between

@@ -17,12 +17,29 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import config
-from adapters.basis import compute_basis_pairs
+from adapters.basis import compute_basis_pairs, split_stale
 from adapters.bitunix_klines import DEFAULT_INTERVAL
 from adapters.bot_files import BotStateAdapter
 from adapters.discovery import DiscoveredBot, discover
 
 app = FastAPI()
+
+
+# StaticFiles answers with an ETag but no Cache-Control, which leaves each
+# browser's own heuristics to decide how long "fresh" means — Safari in
+# particular has been seen serving a stale disk-cached JS bundle across a
+# plain reload, so a code fix landing on the server can silently never reach
+# an already-open tab no matter how many times it's redeployed. `no-cache`
+# doesn't disable caching, it just forces a conditional GET (If-None-Match)
+# on every load, so a real reload always finds out whether the file changed
+# instead of trusting a cached copy's guess.
+@app.middleware("http")
+async def _no_cache_static(request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 
 _STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
@@ -58,6 +75,15 @@ _nav_history: dict[str, deque] = {}
 _state_history: dict[str, deque] = {}
 _last_class: dict[str, str | None] = {}
 
+# When this dashboard watched each bot come back to life. The tracker's
+# session log is authoritative for *finished* sessions, but the running one
+# has no row yet, and its true start is the process start — which the ledger
+# can only lower-bound by its first fill. This is the better answer when we
+# happen to have been watching, and it survives a browser closing (the
+# liveness thread runs regardless); it does not survive this process
+# restarting, which is exactly why it is a preference and not the source.
+_observed_session_start: dict[str, float] = {}
+
 
 def _classify(age_s: float | None) -> str | None:
     if age_s is None:
@@ -82,12 +108,20 @@ def _record_transitions(found: dict[str, DiscoveredBot]) -> None:
             if prev is not None and cls != prev:
                 hist = _state_history.setdefault(key, deque(maxlen=config.STATE_HISTORY_MAXLEN))
                 hist.append({"ts": now, "from": prev, "to": cls})
+                # A bot coming back from dead is a new session starting, and
+                # this is the closest thing to the process start that can be
+                # observed from outside it. `src_ts` (the bot's own heartbeat)
+                # rather than `now`, so the start doesn't drift by however
+                # long this thread's tick happened to be.
+                if prev == "dead" and cls == "live":
+                    _observed_session_start[key] = src_ts or now
             _last_class[key] = cls
         # A bot dropped by discovery (its files were deleted) has nothing
         # left to classify; drop its bookkeeping so it doesn't linger forever.
         for key in set(_last_class) - set(found):
             _last_class.pop(key, None)
             _state_history.pop(key, None)
+            _observed_session_start.pop(key, None)
 
 
 def _incidents_feed(found: dict[str, DiscoveredBot]) -> list[dict]:
@@ -116,7 +150,36 @@ def _background_state_loop() -> None:
         time.sleep(config.STATE_POLL_S)
 
 
+def _account_warm_loop() -> None:
+    """Keeps every account adapter's cache hot off the request path.
+
+    Each account adapter refreshes itself over signed REST on its own
+    interval, but it did so *inside* whichever /snapshot call happened to
+    arrive after its cache expired — and /snapshot asks every discovered bot
+    for its account, so one unlucky request paid three or four sequential
+    round trips and took over a second while the rest took 0.1s. That is the
+    periodic stall you can watch in the UI, and on a slow link it is enough
+    to trip the frontend's own "link down" threshold.
+
+    Ticking faster than the adapters' TTL means the expiry is essentially
+    always reached here first, so requests find a warm cache and return
+    without touching the network. Nothing is computed or stored here: this
+    only pre-pays the same fetch the request would otherwise have made, so
+    the numbers served are identical either way.
+    """
+    interval = max(0.5, config.ACCOUNT_POLL_INTERVAL_S / 2)
+    while True:
+        try:
+            for adapter in list(_account_adapters.values()):
+                if adapter is not None:
+                    adapter.get_account()  # returns None on failure, never raises
+        except Exception:
+            pass  # same reasoning as _background_state_loop
+        time.sleep(interval)
+
+
 threading.Thread(target=_background_state_loop, daemon=True).start()
+threading.Thread(target=_account_warm_loop, daemon=True).start()
 
 
 def _refresh(force: bool = False) -> dict[str, DiscoveredBot]:
@@ -135,19 +198,24 @@ def _refresh(force: bool = False) -> dict[str, DiscoveredBot]:
             return dict(_bots)
         _last_scan_ts = now
 
-        found = {b.key: b for b in discover(config.VIZ_GLOBS, config.FILLS_GLOBS)}
+        found = {
+            b.key: b
+            for b in discover(
+                config.VIZ_GLOBS, config.FILLS_GLOBS, exclude=config.DISCOVERY_EXCLUDE
+            )
+        }
 
         for key, bot in found.items():
             existing = _bots.get(key)
             # Rebuild the reader if the bot moved to a different file, so a
             # relocated or restarted-elsewhere bot doesn't keep serving the
             # old path's contents.
-            if existing is None or existing.viz_path != bot.viz_path or existing.fills_path != bot.fills_path:
+            if existing is None or existing.viz_path != bot.viz_path or existing.fills_paths != bot.fills_paths:
                 _state_adapters[key] = BotStateAdapter(
                     venue_name=bot.exchange,
                     symbol=bot.symbol,
                     viz_path=bot.viz_path,
-                    fills_path=bot.fills_path,
+                    fills_paths=bot.fills_paths,
                     fills_maxlen=config.FILLS_MAXLEN,
                 )
             if key not in _kline_adapters:
@@ -192,7 +260,7 @@ def bots() -> dict:
     return {"server_ts": time.time(), "bots": out}
 
 
-def _compute_basis(found: dict[str, DiscoveredBot]) -> list[dict]:
+def _compute_basis(found: dict[str, DiscoveredBot]) -> dict:
     """Cross-venue mid basis for every pair of legs sharing an asset.
 
     Reads each bot's own orderbook (already-cached local file, no network
@@ -200,7 +268,12 @@ def _compute_basis(found: dict[str, DiscoveredBot]) -> list[dict]:
     negligible next to the kline/account fetches already happening. History
     is appended here rather than in a background loop: a pair with no active
     poller (nobody has this dashboard open) correctly keeps no history.
+
+    Legs whose mid is too old to compare are dropped *before* pairing and
+    returned separately, so the panel can name what it refused to price
+    instead of silently showing fewer rows — see adapters/basis.py.
     """
+    now = time.time()
     legs = []
     for key, bot in found.items():
         adapter = _state_adapters.get(key)
@@ -211,16 +284,62 @@ def _compute_basis(found: dict[str, DiscoveredBot]) -> list[dict]:
                 "exchange": bot.exchange,
                 "symbol": bot.symbol,
                 "mid": ob["mid"] if ob else 0.0,
+                "ts": ob["ts"] if ob else 0.0,
             }
         )
 
+    fresh, stale = split_stale(legs, now=now, max_age_s=config.BASIS_MAX_AGE_S)
+
     out = []
-    for pair in compute_basis_pairs(legs):
+    for pair in compute_basis_pairs(fresh, now=now):
         hist_key = f"{pair['a']}|{pair['b']}"
         hist = _basis_history.setdefault(hist_key, deque(maxlen=config.BASIS_HISTORY_LEN))
         hist.append(pair["bps"])
         out.append({**pair, "history": list(hist)})
-    return out
+
+    # A pair that goes stale must not keep serving the history it had while
+    # it was live: the sparkline would carry on showing a shape for a number
+    # that no longer exists.
+    live_keys = {f"{p['a']}|{p['b']}" for p in out}
+    for hist_key in set(_basis_history) - live_keys:
+        _basis_history.pop(hist_key, None)
+
+    return {"pairs": out, "stale": stale}
+
+
+def _resolve_session(key: str, adapter: BotStateAdapter, requested: str | None):
+    """The session to report on, and the full list to offer.
+
+    Defaults to the running one — the operator's "how is tonight going" —
+    and falls back to the most recent finished session when the bot is
+    stopped, so a dashboard opened the morning after still shows the night
+    rather than an empty panel.
+    """
+    sessions = adapter.get_sessions(_observed_session_start.get(key))
+    if not sessions:
+        return None, []
+    selected = None
+    if requested is not None:
+        selected = next((s for s in sessions if str(s.index) == requested), None)
+    if selected is None:
+        selected = sessions[-1]
+    return selected, sessions
+
+
+def _session_payload(s, server_ts: float) -> dict:
+    return {
+        "index": s.index,
+        "start_ts": s.start_ts,
+        "end_ts": s.end_ts,
+        "is_current": s.is_current,
+        "clean_exit": s.clean_exit,
+        # How the start was established, so the panel can say whether it is
+        # the process start or merely the first fill seen since the previous
+        # session — the two differ by however long the bot ran before it
+        # traded.
+        "start_source": s.start_source,
+        "elapsed_s": (s.end_ts or server_ts) - s.start_ts,
+    }
 
 
 def _bot_summary(key: str, bot_info: DiscoveredBot) -> dict:
@@ -231,7 +350,14 @@ def _bot_summary(key: str, bot_info: DiscoveredBot) -> dict:
     it here for every discovered bot on every snapshot does not add REST
     calls beyond what that adapter's own poll interval already allows."""
     adapter = _state_adapters[key]
-    stats = adapter.get_stats()
+    # Every portfolio row is scoped to that bot's own current session, so the
+    # column means the same thing as the Performance panel instead of being
+    # a different window with the same label.
+    session, _ = _resolve_session(key, adapter, None)
+    stats = adapter.get_stats(
+        since_ts=session.start_ts if session else None,
+        until_ts=session.end_ts if session else None,
+    )
     account_adapter = _account_adapters.get(key)
     account = account_adapter.get_account() if account_adapter else None
     if account is not None:
@@ -249,8 +375,46 @@ def _bot_summary(key: str, bot_info: DiscoveredBot) -> dict:
         # realised PnL the fills window doesn't support.
         "realised_net": None if stats.get("pnl_unreliable") else stats["realised_net"],
         "pnl_unreliable": stats.get("pnl_unreliable"),
+        # Survives what the realised figure can't (hedge mode above all), so
+        # a row is not left blank on the leg doing most of the volume.
+        "cash_pnl": stats.get("cash_pnl"),
+        "session_index": session.index if session else None,
         "account_upnl": account["unrealised_pnl"] if account else None,
     }
+
+
+def _decimate_curve(curve: list[dict], max_points: int) -> list[dict]:
+    """Thin a per-fill series down to something a 200px mini-chart can
+    actually show, without flattening what it is there to reveal.
+
+    A busy leg produces thousands of points per session — the Coinbase one
+    reached 4447, which is 976KB of the 1296KB response, resent every 1.5s
+    poll and enough to make the UI stall for seconds at a time behind an SSH
+    tunnel. No chart that size can render 4447 distinct points anyway.
+
+    Plain every-Nth sampling would drop the extremes, which on a PnL curve
+    means quietly erasing the drawdown it exists to show. So each bucket
+    contributes its minimum *and* its maximum point, in time order: the
+    envelope survives, and the last point is always kept so the live value
+    and `max_drawdown` (computed over the full series upstream, not from
+    these points) stay exact.
+    """
+    if len(curve) <= max_points:
+        return curve
+    buckets = max(1, max_points // 2)
+    size = len(curve) / buckets
+    out: list[dict] = []
+    for i in range(buckets):
+        chunk = curve[int(i * size) : int((i + 1) * size)]
+        if not chunk:
+            continue
+        lo = min(chunk, key=lambda p: p["realised_net"])
+        hi = max(chunk, key=lambda p: p["realised_net"])
+        for p in sorted({id(lo): lo, id(hi): hi}.values(), key=lambda p: p["ts"]):
+            out.append(p)
+    if out and out[-1] is not curve[-1]:
+        out.append(curve[-1])
+    return out
 
 
 def _klines_sig(candles: list) -> str:
@@ -273,14 +437,23 @@ def snapshot(
     bot: str | None = None,
     interval: str = DEFAULT_INTERVAL,
     ksig: str | None = None,
+    session: str | None = None,
 ) -> dict:
     """`ksig` is the candle signature the caller already holds. Deep history
     made the candles ~82% of every response while changing at most once per
     kline poll, so an unchanged history is answered with its signature alone
     instead of thousands of identical rows."""
     found = _refresh()
+    now_ts = time.time()
     if not found:
-        return {"server_ts": time.time(), "bot": None, "bots": [], "venue": None, "basis": [], "incidents": []}
+        return {
+            "server_ts": time.time(),
+            "bot": None,
+            "bots": [],
+            "venue": None,
+            "basis": {"pairs": [], "stale": []},
+            "incidents": [],
+        }
 
     # Spans every discovered bot, not just the selected one, so the basis
     # panel keeps reading even while the chart is pointed at a single leg.
@@ -309,8 +482,18 @@ def snapshot(
     if kline_adapter and interval not in supported:
         interval = kline_adapter.default_interval
 
+    selected_session, all_sessions = _resolve_session(bot, state, session)
+    session_start = selected_session.start_ts if selected_session else None
+    # None for the running session, so it keeps extending; a finished one is
+    # closed at its recorded end, otherwise every past session would silently
+    # include everything traded since.
+    session_end = selected_session.end_ts if selected_session else None
+
+    # The chart follows the session too: an operator looking at tonight's
+    # performance wants tonight's candles, not every bar back to the oldest
+    # fill still in the ledger.
     klines = (
-        kline_adapter.get_klines(interval, since_ts=state.get_first_fill_ts())
+        kline_adapter.get_klines(interval, since_ts=session_start or state.get_first_fill_ts())
         if kline_adapter
         else []
     )
@@ -329,12 +512,24 @@ def snapshot(
         "positions": state.get_positions(),
         "fills": state.get_recent_fills(),
         "quotes": state.get_quotes(),
-        "stats": state.get_stats(),
+        "stats": state.get_stats(since_ts=session_start, until_ts=session_end),
+        # Which run these figures cover, and every run available to switch
+        # to. A performance number whose window isn't stated isn't a
+        # measurement — this is that window, on screen.
+        "session": _session_payload(selected_session, now_ts) if selected_session else None,
+        # Where the mid went after each fill of this session — the measure
+        # that says whether the spread captured at t=0 survives. See
+        # adapters/markouts.py.
+        "markouts": state.get_markouts(since_ts=session_start, until_ts=session_end),
+        "sessions": [_session_payload(s, now_ts) for s in all_sessions],
         # Same FIFO replay as `stats`, kept as a per-fill series instead of
         # collapsed to a total — feeds the Curve (cumulative realised PnL),
         # Delta (running inventory) and Volume (cumulative traded notional)
         # panels.
-        "equity_curve": state.get_equity_curve(),
+        "equity_curve": _decimate_curve(
+            state.get_equity_curve(since_ts=session_start, until_ts=session_end),
+            config.CURVE_MAX_POINTS,
+        ),
         # The bot's own heartbeat. Distinct from server_ts below: this server
         # answers happily while the bot it watches is dead, and the frontend
         # must be able to tell those two apart.

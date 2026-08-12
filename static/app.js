@@ -7,7 +7,12 @@ const POLL_MS = 1500;
 //   link  — we cannot reach our own server (tunnel dropped, uvicorn died).
 //   bot   — the server answers fine, but the bot stopped writing its state.
 // The second is the dangerous one: everything still renders, just frozen.
-const LINK_STALE_MS = 6000;
+// 6s was tighter than a single round trip over an SSH tunnel to a loaded
+// VPS, so an ordinary slow response — not a lost link — flipped the badge to
+// "link down" and back every few seconds. Widening it makes the badge mean
+// what it says; the numbers it guards are at most this stale, still far
+// inside BOT_STALE_MS below, so nothing is being hidden by the change.
+const LINK_STALE_MS = 12000;
 const BOT_STALE_MS = 15000;
 const BOT_DEAD_MS = 60000;
 // Recomputed on a timer rather than per poll, so the age keeps counting up
@@ -150,7 +155,7 @@ function renderTimeframeBar(venue) {
     candleSeries.setData([]);
     volumeSeries.setData([]);
     updateChartLabel();
-    poll(); // don't wait for the next tick — the click should feel instant
+    poll(true); // don't wait for the next tick — the click should feel instant
   });
 }
 
@@ -367,9 +372,15 @@ function renderPosition(venue) {
     rows.push(`
       <div class="account-block">
         <div class="row"><span class="label">available</span><span class="val">${fmt(a.available, 2)}</span></div>
+        <div class="row" title="Capital locked by resting orders. Leaving this out is what made the NAV swing with quoting activity rather than with net assets."><span class="label">frozen<small>orders</small></span><span class="val">${fmt(a.frozen, 2)}</span></div>
         <div class="row"><span class="label">margin used</span><span class="val">${fmt(a.margin_used, 2)}</span></div>
-        <div class="row"><span class="label">cross uPnL</span><span class="val ${pnlCls}">${fmt(a.unrealised_pnl, 2)}</span></div>
-        <div class="row"><span class="label">equity (nav)</span><span class="val">${fmt(a.equity, 2)}</span></div>
+        <div class="row"><span class="label">uPnL</span><span class="val ${pnlCls}">${fmt(a.unrealised_pnl, 2)}</span></div>
+        <div class="row" title="available + frozen + margin + uPnL, in the margin currency. Scope: ${a.equity_scope || "—"}"><span class="label">equity (nav)<small>${a.equity_scope || ""}</small></span><span class="val">${fmt(a.equity, 2)}</span></div>
+        ${
+          a.account_equity_total !== null && a.account_equity_total !== undefined
+            ? `<div class="row" title="Every currency this venue account holds, valued in USD. Spans products this bot has nothing to do with, so it is reported apart from the NAV above rather than folded into it."><span class="label">account total<small>all ccy</small></span><span class="val">${fmt(a.account_equity_total, 2)}</span></div>`
+            : ""
+        }
       </div>
     `);
   } else {
@@ -396,21 +407,48 @@ function sparklineSvg(values, w = 60, h = 16) {
   return `<svg width="${w}" height="${h}" class="basis-spark"><polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`;
 }
 
-function renderBasis(pairs) {
+function renderBasis(basis) {
   const body = document.getElementById("basis-body");
-  if (!pairs || pairs.length === 0) {
-    body.innerHTML = `<div class="empty-note">need 2 legs on different venues</div>`;
+  // Back-compat with the older shape (a bare array of pairs), so a stale
+  // cached bundle talking to a new server doesn't blank the panel.
+  const pairs = Array.isArray(basis) ? basis : (basis && basis.pairs) || [];
+  const stale = (basis && basis.stale) || [];
+
+  // A leg dropped for being too old is named, not silently omitted: the
+  // whole point is that a frozen mid is invisible unless something says so.
+  const staleRows = stale
+    .map(
+      (s) =>
+        `<div class="row basis-row basis-stale">
+           <span class="label">${s.key}</span>
+           <span class="val">${s.age_s === null ? "no ts" : fmtDuration(s.age_s) + " old"}</span>
+         </div>`
+    )
+    .join("");
+
+  if (pairs.length === 0) {
+    body.innerHTML =
+      `<div class="empty-note">need 2 legs on different venues with a fresh mid</div>` + staleRows;
     return;
   }
-  body.innerHTML = pairs
-    .map((p) => {
-      const cls = p.bps >= 0 ? "pnl-pos" : "pnl-neg";
-      return `<div class="row basis-row">
+
+  body.innerHTML =
+    pairs
+      .map((p) => {
+        const cls = p.bps >= 0 ? "pnl-pos" : "pnl-neg";
+        // The two mids are not sampled at the same instant (one bot writes
+        // its book far more often than the other), and on a fast asset that
+        // skew is worth bps of its own — the same order as the basis being
+        // measured. Quoting the gap without it would be a number with no
+        // protocol behind it.
+        const skew =
+          p.skew_s >= 1 ? `<small>±${fmt(p.skew_s, 0)}s skew</small>` : "";
+        return `<div class="row basis-row">
         <span class="label">${p.label}</span>
-        <span class="val ${cls}">${sparklineSvg(p.history)}${fmt(p.bps, 1)} bps</span>
+        <span class="val ${cls}">${sparklineSvg(p.history)}${fmt(p.bps, 1)} bps${skew}</span>
       </div>`;
-    })
-    .join("");
+      })
+      .join("") + staleRows;
 }
 
 // --- Incident timeline ---
@@ -447,6 +485,10 @@ function renderIncidents(events, serverTs) {
 // wants: land on whatever is actually running rather than on an alphabetical
 // first entry that may have been dead for days.
 let currentBotKey = null;
+// null = follow the running session. Set only by an explicit pick in the
+// session dropdown, and cleared when switching bots — session #3 of one bot
+// has nothing to do with session #3 of another.
+let currentSession = null;
 let lastBotsSig = "";
 
 function resetChartState() {
@@ -480,35 +522,53 @@ function botStateClass(ageS) {
 // meaningful while the bot is alive — a dead bot's last-written position is
 // a fossil, not a reading, so the caller passes `dead` and this refuses to
 // print it, same refusal as renderDeadBot for the selected bot.
+const side_ = (qty) => (qty > 0 ? "long" : qty < 0 ? "short" : "flat");
+
 function botSummaryLine(bot, dead) {
   if (dead) return `<span class="empty-note" style="font-size:10.5px;">stopped</span>`;
 
+  // Session PnL for the row: the realised figure when it can be defended,
+  // otherwise the cash-flow one, which holds in hedge mode. Never both, and
+  // never a blank where a leg is trading — the label says which is shown.
+  const sessionPnl =
+    !bot.pnl_unreliable && bot.realised_net !== null && bot.realised_net !== undefined
+      ? { v: bot.realised_net, tag: "" }
+      : bot.cash_pnl !== null && bot.cash_pnl !== undefined
+      ? { v: bot.cash_pnl, tag: "<small>cash</small>" }
+      : null;
+  const pnlSpan = sessionPnl
+    ? `<span class="val ${sessionPnl.v >= 0 ? "pnl-pos" : "pnl-neg"}">${fmt(sessionPnl.v, 4)}${sessionPnl.tag}</span>`
+    : "";
+
   const positions = bot.positions || [];
   if (positions.length === 0) {
-    const net =
-      bot.pnl_unreliable || bot.realised_net === null || bot.realised_net === undefined
-        ? ""
-        : `<span class="val ${bot.realised_net >= 0 ? "pnl-pos" : "pnl-neg"}">${fmt(bot.realised_net, 4)}</span>`;
-    return `<span class="label">flat</span>${net}`;
+    return `<span class="label">flat</span>${pnlSpan}`;
   }
 
   let netQty = 0;
-  let upnl = bot.account_upnl ?? 0;
+  let posUpnl = 0;
   let hasPosUpnl = false;
   for (const p of positions) {
     netQty += (p.side === "LONG" ? 1 : -1) * (p.qty_base || 0);
     if (p.unrealised_pnl !== null && p.unrealised_pnl !== undefined) {
-      upnl += p.unrealised_pnl;
+      posUpnl += p.unrealised_pnl;
       hasPosUpnl = true;
     }
   }
-  const side = netQty > 0 ? "long" : netQty < 0 ? "short" : "flat";
-  const showUpnl = hasPosUpnl || bot.account_upnl !== null;
-  const pnlCls = upnl >= 0 ? "pnl-pos" : "pnl-neg";
+  // One source, not two added together. The account's cross uPnL and the
+  // position's own uPnL are the same money seen from two places — summing
+  // them double-counted it (visible on OKX: +2.27 account against -0.57
+  // position). The position's figure is preferred: it is scoped to the
+  // symbol this row is about, while the account's spans every product on
+  // that venue.
+  const upnl = hasPosUpnl ? posUpnl : bot.account_upnl;
+  const showUpnl = upnl !== null && upnl !== undefined;
+  const pnlCls = showUpnl && upnl >= 0 ? "pnl-pos" : "pnl-neg";
   return (
-    `<span class="pos-side-label ${side}">${side}</span>` +
+    `<span class="pos-side-label ${side_(netQty)}">${side_(netQty)}</span>` +
     `<span class="val">${fmt(Math.abs(netQty), 3)}</span>` +
-    (showUpnl ? `<span class="val ${pnlCls}">${fmt(upnl, 4)}</span>` : "")
+    (showUpnl ? `<span class="val ${pnlCls}" title="unrealised">${fmt(upnl, 4)}</span>` : "") +
+    pnlSpan
   );
 }
 
@@ -534,7 +594,8 @@ function renderBotList(bots, serverTs, selectedKey) {
     .map(
       (b) =>
         `${b.key}|${b.source_ts ? Math.round(serverTs - b.source_ts) : "x"}` +
-        `|${JSON.stringify(b.positions || [])}|${b.realised_net}|${b.account_upnl}`
+        `|${JSON.stringify(b.positions || [])}|${b.realised_net}|${b.account_upnl}` +
+        `|${b.cash_pnl}|${b.session_index}`
     )
     .join(",") + `|${selectedKey}`;
   if (sig === lastBotsSig) return;
@@ -562,9 +623,29 @@ document.getElementById("bots-body").addEventListener("click", (e) => {
   if (!row || row.dataset.bot === currentBotKey) return;
   currentBotKey = row.dataset.bot;
 
+  // Optimistic: a /snapshot round trip through a real SSH tunnel can take
+  // several seconds, well past this being the next poll tick — waiting for
+  // that response to confirm the switch before moving the highlight made a
+  // slow *link* look like the click hadn't registered, or worse, like it
+  // had silently reverted to the old bot. Reflect the user's choice in the
+  // list the instant they make it; renderBotList's own render on the next
+  // successful poll just re-confirms the same thing once real data lands.
+  document.querySelectorAll("#bots-body .bot-row.active").forEach((r) => r.classList.remove("active"));
+  row.classList.add("active");
+
   resetChartState();
   lastBotsSig = "";
-  poll();
+  currentSession = null; // session numbering is per bot
+  lastSessionSig = "";
+  poll(true); // supersedes any request still in flight for the old bot
+});
+
+document.getElementById("session-select").addEventListener("change", (e) => {
+  // Picking the newest (running) session goes back to following it, so it
+  // keeps updating instead of freezing on the index it had when picked.
+  currentSession = e.target.selectedIndex === 0 ? null : e.target.value;
+  resetChartState();
+  poll(true);
 });
 
 function fmtDuration(s) {
@@ -575,24 +656,86 @@ function fmtDuration(s) {
   return `${(s / 86400).toFixed(1)}d`;
 }
 
-function renderStats(stats) {
+function fmtClock(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+// Which run is being measured, and which others can be looked at. Rebuilt
+// only when the set of sessions actually changes, so the dropdown doesn't
+// close itself under the operator's cursor on every 1.5s poll.
+let lastSessionSig = "";
+function renderSessionBar(sessions, selected) {
+  const sel = document.getElementById("session-select");
+  const note = document.getElementById("session-note");
+  const list = sessions || [];
+
+  const sig = list.map((s) => `${s.index}|${s.start_ts}|${s.end_ts}`).join(",") +
+    `|${selected ? selected.index : ""}`;
+  if (sig !== lastSessionSig) {
+    lastSessionSig = sig;
+    sel.innerHTML = list
+      .slice()
+      .reverse()
+      .map((s) => {
+        const d = new Date(s.start_ts * 1000);
+        const day = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`;
+        const label = s.is_current
+          ? `#${s.index} · running · started ${day} ${fmtClock(s.start_ts)}`
+          : `#${s.index} · ${day} ${fmtClock(s.start_ts)}→${fmtClock(s.end_ts)} · ${fmtDuration(s.end_ts - s.start_ts)}`;
+        return `<option value="${s.index}"${selected && s.index === selected.index ? " selected" : ""}>${label}</option>`;
+      })
+      .join("");
+    sel.style.display = list.length ? "" : "none";
+  }
+
+  if (!selected) {
+    note.textContent = "";
+    return;
+  }
+  // A session whose start could only be lower-bounded by its first fill is
+  // not the same claim as one whose start was watched happening. Say which.
+  if (selected.start_source === "first fill since last session") {
+    note.textContent = "start≈1st fill";
+    note.title =
+      "This session's start is the first fill recorded after the previous session ended — a lower bound on the real process start, which was not observed.";
+  } else if (selected.clean_exit === false) {
+    note.textContent = "unclean exit";
+    note.title = "The tracker recorded this session ending without a clean shutdown.";
+  } else {
+    note.textContent = "";
+    note.title = "";
+  }
+}
+
+function renderStats(stats, session) {
   const body = document.getElementById("stats-body");
   const windowEl = document.getElementById("stats-window");
 
   if (!stats || stats.n_fills === 0) {
-    windowEl.textContent = "—";
-    body.innerHTML = `<div class="empty-note">no fills in window</div>`;
+    windowEl.textContent = session ? fmtDuration(session.elapsed_s) : "—";
+    body.innerHTML = `<div class="empty-note">${
+      session && session.is_current ? "session running, no fill yet" : "no fills in window"
+    }</div>`;
     return;
   }
 
   // The header states the window these numbers actually cover. Without it
   // every figure below invites the reader to assume "since I started
-  // watching", which is never what it means.
-  windowEl.textContent = `last ${stats.n_fills} fills · ${fmtDuration(stats.span_s)}`;
+  // watching", which is never what it means. That window is now one run of
+  // the bot — the thing an operator actually reasons about — instead of
+  // "the last N fills", which moved under the reader's feet and spliced
+  // several runs together whenever a session was short.
+  windowEl.textContent = session
+    ? `session #${session.index} · ${fmtDuration(session.elapsed_s)}${session.is_current ? " · running" : ""}`
+    : `last ${stats.n_fills} fills · ${fmtDuration(stats.span_s)}`;
 
+  // Withheld on one-sided flow, where it would measure price drift rather
+  // than captured spread — the dash carries the reason on hover.
   const capture =
     stats.capture_bps === null || stats.capture_bps === undefined
-      ? "—"
+      ? `<span title="${stats.capture_unavailable || "not enough two-sided flow"}">—</span>`
       : `${fmt(stats.capture_bps, 1)} bps`;
 
   // Everything above the divider is a direct count or sum over the fills:
@@ -606,12 +749,35 @@ function renderStats(stats) {
     <div class="row"><span class="label">capture</span><span class="val">${capture}</span></div>
   `;
 
+  // Independent of FIFO lot matching, so it is shown even when the realised
+  // figure below is refused — on a hedge-mode leg it is the only answer to
+  // "how did this session go" that can be given honestly. Marked to market
+  // on whatever inventory the session still carries, hence the label: this
+  // is not a realised number and must not be read as one.
+  let cashRow = "";
+  if (stats.cash_pnl !== null && stats.cash_pnl !== undefined) {
+    const cashCls = stats.cash_pnl >= 0 ? "pnl-pos" : "pnl-neg";
+    const openBasis =
+      stats.cash_pnl_basis === "ledger"
+        ? "opening inventory from the bot's own record on the session's first fill"
+        : stats.cash_pnl_basis === "replay"
+        ? "opening inventory rebuilt by replaying earlier fills — the ledger records none"
+        : "window opens flat by construction";
+    cashRow = (
+      `<div class="row stat-net" title="Cash in from sells minus cash out on buys, plus closing inventory marked at the last mid, minus the same for the opening inventory, minus fees. No lot matching, so it holds in hedge mode. Includes mark-to-market on unclosed inventory — ${openBasis}.">
+         <span class="label">session pnl<small>cash</small></span>
+         <span class="val ${cashCls}">${fmt(stats.cash_pnl, 4)}</span>
+       </div>`
+    );
+  }
+
   if (stats.pnl_unreliable) {
     // A PnL that cannot be defended is not shown as a number. Printing it
     // greyed out would still leave a figure on screen to be read and
     // believed, which is exactly how the wrong one got trusted.
     body.innerHTML =
       measured +
+      cashRow +
       `<div class="stat-net pnl-blocked">
          <div class="pnl-blocked-title">realised pnl unavailable</div>
          <div class="pnl-blocked-why">${stats.pnl_unreliable}</div>
@@ -620,13 +786,25 @@ function renderStats(stats) {
   }
 
   const netCls = stats.realised_net >= 0 ? "pnl-pos" : "pnl-neg";
+  // A finished session shows what it *ended* holding. Showing the current
+  // inventory under a header naming last night's run would be the same
+  // category of error this panel exists to avoid.
+  const inv =
+    session && !session.is_current ? stats.closing_inventory_base : stats.inventory_base;
   body.innerHTML =
     measured +
+    cashRow +
     `
-    <div class="row"><span class="label">inventory</span><span class="val">${fmt(stats.inventory_base, 3)}</span></div>
+    <div class="row"><span class="label">inventory</span><span class="val">${fmt(inv, 3)}</span></div>
     <div class="row"><span class="label">realised gross</span><span class="val">${fmt(stats.realised_gross, 4)}</span></div>
     <div class="row stat-net"><span class="label">realised net</span><span class="val ${netCls}">${fmt(stats.realised_net, 4)}</span></div>
-  `;
+  ` +
+    // Shown, but not passed off as checked. Distinct from the refusal
+    // above: there is no evidence this figure is wrong, only no way to
+    // prove it right.
+    (stats.pnl_unverified
+      ? `<div class="pnl-unverified" title="${stats.pnl_unverified}">unverified — no position published to check the replay against</div>`
+      : "");
 }
 
 // --- Curve (cumulative realised PnL) & Delta (running inventory) ---
@@ -710,6 +888,7 @@ function renderCurve(curve) {
   renderVolumeCurve(curve);
 
   const panel = document.getElementById("curve-panel");
+  const grid = document.getElementById("curve-panel-grid");
   const emptyEl = document.getElementById("curve-empty");
   const blocks = panel.querySelectorAll(".mini-chart-block:not(#volume-curve-block)");
   const curveVal = document.getElementById("curve-val");
@@ -718,6 +897,9 @@ function renderCurve(curve) {
 
   if (!curve || curve.length === 0) {
     blocks.forEach((b) => (b.style.display = "none"));
+    // No curve data at all (not even for Volume — renderVolumeCurve above
+    // already hid its block too), so there's nothing left to span the row.
+    grid.classList.remove("only-volume");
     emptyEl.style.display = "";
     emptyEl.textContent = "no fills yet";
     curveVal.textContent = "—";
@@ -735,6 +917,7 @@ function renderCurve(curve) {
     // Drawdown is derived from realised_net, so it's exactly as fictional
     // as the total on a window flagged unreliable — same refusal.
     blocks.forEach((b) => (b.style.display = "none"));
+    grid.classList.add("only-volume"); // Volume is the only block left, let it take the row
     emptyEl.style.display = "";
     emptyEl.innerHTML = `<div class="pnl-blocked-title">unavailable</div><div class="pnl-blocked-why">${last.pnl_unreliable}</div>`;
     curveVal.textContent = "—";
@@ -749,6 +932,7 @@ function renderCurve(curve) {
   lastCurveSig = sig;
 
   blocks.forEach((b) => (b.style.display = ""));
+  grid.classList.remove("only-volume");
   emptyEl.style.display = "none";
 
   const points = _byTime(curve);
@@ -763,6 +947,63 @@ function renderCurve(curve) {
   curveDdVal.textContent = `dd ${last.max_drawdown > 0 ? "-" : ""}${fmt(last.max_drawdown, 4)}`;
   deltaVal.textContent = fmt(last.inventory_base, 3);
   deltaVal.className = `val ${last.inventory_base >= 0 ? "pnl-pos" : "pnl-neg"}`;
+}
+
+// --- Markout ---
+// Where the mid went after each fill, per horizon. The one panel that can
+// tell a spread that was captured from one that was handed straight back.
+// Bars diverge from a centre line: right = kept, left = given back.
+function renderMarkout(mo) {
+  const body = document.getElementById("markout-body");
+  const note = document.getElementById("markout-note");
+  const points = (mo && mo.points) || [];
+  const sampled = points.filter((p) => p.n > 0);
+
+  if (sampled.length === 0) {
+    note.textContent = "—";
+    body.innerHTML = `<div class="empty-note">no markout data for this session</div>`;
+    return;
+  }
+
+  // n is the same for every horizon in practice, but report the largest
+  // rather than assume it — a horizon the tracker hasn't reached yet (a
+  // fill 10s old has no 30s mid) legitimately has fewer.
+  const n = Math.max(...sampled.map((p) => p.n));
+  note.textContent = `${n} fills`;
+  note.title =
+    mo.joined_by === "trade_id"
+      ? "Matched to this bot's own fills by trade id — this venue carries more than one symbol."
+      : "This venue carries a single symbol in the ledger, so every markout row on it belongs to this bot.";
+
+  // Scale to the largest magnitude on screen, so a flat book doesn't render
+  // as noise amplified to full width — but never below 1bp, or a 0.05bp
+  // wobble would look like a catastrophe.
+  const scale = Math.max(1, ...sampled.map((p) => Math.abs(p.bps)));
+
+  body.innerHTML =
+    points
+      .map((p) => {
+        if (p.n === 0) {
+          return `<div class="mo-row"><span class="h">${p.horizon}</span>
+            <span class="mo-track"></span><span class="mo-val">—</span>
+            <span class="mo-sides">not sampled</span></div>`;
+        }
+        const w = Math.min(50, (Math.abs(p.bps) / scale) * 50);
+        const cls = p.bps >= 0 ? "pos" : "neg";
+        const side = (v) => (v === null || v === undefined ? "—" : fmt(v, 1));
+        return `<div class="mo-row" title="mean ${fmt(p.bps, 2)} bps, median ${fmt(
+          p.median_bps,
+          2
+        )} bps over ${p.n} fills">
+          <span class="h">${p.horizon}</span>
+          <span class="mo-track"><span class="mo-bar ${cls}" style="width:${w}%"></span></span>
+          <span class="mo-val ${p.bps >= 0 ? "pnl-pos" : "pnl-neg"}">${fmt(p.bps, 2)}</span>
+          <span class="mo-sides">B ${side(p.buy_bps)} / S ${side(p.sell_bps)}</span>
+        </div>`;
+      })
+      .join("") +
+    `<div class="mo-legend">bps the mid moved your way after a fill. Negative = adverse selection.
+     Relative to the mid at fill, so it is unaffected by where that mid sits.</div>`;
 }
 
 function renderNav(navCurve) {
@@ -789,6 +1030,19 @@ function renderNav(navCurve) {
   const points = _byTime(navCurve);
   navSeries.setData(points.map(([ts, p]) => ({ time: ts, value: p.equity })));
   valEl.textContent = fmt(last.equity, 2);
+
+  // The window this curve actually covers. It is sampled once per poll by
+  // whoever is watching — not replayed from any ledger — so it is minutes
+  // long, shrinks when several tabs share the buffer, and does not exist at
+  // all while nobody has the dashboard open. Stating it stops the axis from
+  // being read as "the session".
+  const span = last.ts - navCurve[0].ts;
+  const windowEl = document.getElementById("nav-window");
+  if (windowEl) {
+    windowEl.textContent = `sampled ${fmtDuration(span)}`;
+    windowEl.title =
+      "Account equity is polled, not reconstructed: this series only covers the time a browser has been polling, and is capped at NAV_HISTORY_LEN samples.";
+  }
 }
 
 // A bot past the dead threshold keeps its name and its age, and loses every
@@ -814,15 +1068,14 @@ function renderDeadBot(ageS) {
     dash("available") + dash("margin used") + dash("cross uPnL") + dash("equity (nav)") +
     `</div>` + stopped;
 
-  document.getElementById("stats-window").textContent = "—";
-  document.getElementById("stats-body").innerHTML =
-    dash("fills") + dash("rate") + dash("volume") +
-    dash("fees paid") + dash("capture") +
-    `<div class="row stat-net"><span class="label">realised net</span><span class="val">—</span></div>` +
-    stopped;
+  // Performance is deliberately NOT dashed out here. What a stopped bot
+  // asserts about *now* — its book, its position, its equity — is a fossil
+  // and gets refused. What it did during a session that has since ended is
+  // a settled historical fact, computed from a fill ledger that doesn't go
+  // stale, and it is the main thing an operator opens this dashboard for
+  // the morning after. The caller keeps rendering stats/curve/session bar.
 
   renderBook(null);
-  renderCurve(null);
   renderNav(null);
 }
 
@@ -832,12 +1085,16 @@ function renderBook(ob, quotes) {
   const asksOffEl = document.getElementById("book-asks-off");
   const bidsOffEl = document.getElementById("book-bids-off");
   const spreadEl = document.getElementById("book-spread");
+  const imbFillEl = document.getElementById("imb-fill-bid");
+  const imbLabelEl = document.getElementById("imb-label");
   if (!ob) {
     asksEl.innerHTML = "";
     bidsEl.innerHTML = "";
     asksOffEl.textContent = "";
     bidsOffEl.textContent = "";
     spreadEl.textContent = "—";
+    imbFillEl.style.width = "0%";
+    imbLabelEl.textContent = "—";
     return;
   }
   quotes = quotes || [];
@@ -847,15 +1104,32 @@ function renderBook(ob, quotes) {
   const tol = symbolDecimals !== null ? Math.pow(10, -symbolDecimals) / 2 : 1e-9;
   const findQuote = (side, price) => quotes.find((q) => q.side === side && Math.abs(q.price - price) <= tol);
 
-  // Compact on purpose — the rail is support, the chart is the content.
-  const depth = 7;
-  const asks = ob.asks.slice(0, depth).reverse();
-  const bids = ob.bids.slice(0, depth);
-  const maxSize = Math.max(1e-9, ...asks.map((l) => l.size), ...bids.map((l) => l.size));
+  // The book now has its own wide column (not the narrow rail), so it can
+  // afford to show more of the ladder than the old 7-level compact view.
+  const depth = 15;
+  // Cumulative size from the best price outward, computed before the asks
+  // side is reversed for display — this is what the depth bar is keyed to
+  // now (how much liquidity sits between here and the top of book), not the
+  // single level's own size, which is the standard depth-ladder reading and
+  // makes a real wall visible instead of just a locally tall bar.
+  const withCum = (levels) => {
+    let cum = 0;
+    return levels.map((l) => {
+      cum += l.size;
+      return { ...l, cum };
+    });
+  };
+  const asksCum = withCum(ob.asks.slice(0, depth));
+  const bidsCum = withCum(ob.bids.slice(0, depth));
+  const askTotal = asksCum.length ? asksCum[asksCum.length - 1].cum : 0;
+  const bidTotal = bidsCum.length ? bidsCum[bidsCum.length - 1].cum : 0;
+  const asks = asksCum.slice().reverse();
+  const bids = bidsCum;
+  const maxCum = Math.max(1e-9, askTotal, bidTotal);
   // bookSide is the quote-side vocabulary ("buy"/"sell"); side is the CSS
   // class ("bid"/"ask") — same level, two vocabularies to reconcile.
   const bookRow = (l, side, bookSide) => {
-    const pct = Math.min(100, (l.size / maxSize) * 100);
+    const pct = Math.min(100, (l.cum / maxCum) * 100);
     const own = findQuote(bookSide, l.price);
     const ownTag = own ? `<span class="own-tag">●${fmt(own.size, 3)}</span>` : "";
     return `<div class="book-row ${side}${own ? " own" : ""}"><div class="depth-bar" style="width:${pct}%"></div><span>${fmtPrice(l.price)}</span><span>${fmt(l.size, 3)}${ownTag}</span></div>`;
@@ -864,6 +1138,19 @@ function renderBook(ob, quotes) {
   bidsEl.innerHTML = bids.map((l) => bookRow(l, "bid", "buy")).join("");
   const spreadBps = ob.mid > 0 ? ((ob.best_ask - ob.best_bid) / ob.mid) * 10000 : 0;
   spreadEl.textContent = `spread ${fmtPrice(ob.best_ask - ob.best_bid)} (${fmt(spreadBps, 1)} bps)`;
+
+  // Bid/ask imbalance over the same displayed depth as the ladder above —
+  // whatever "depth" levels means here, the imbalance is over exactly that,
+  // not some other unstated window.
+  const bookTotal = bidTotal + askTotal;
+  if (bookTotal > 0) {
+    const bidPct = (bidTotal / bookTotal) * 100;
+    imbFillEl.style.width = `${bidPct}%`;
+    imbLabelEl.textContent = `${fmt(bidPct, 0)}% bid · ${fmt(100 - bidPct, 0)}% ask (top ${depth})`;
+  } else {
+    imbFillEl.style.width = "0%";
+    imbLabelEl.textContent = "—";
+  }
 
   // A resting quote past the visible depth still says where the bot is
   // waiting — worth one line, not worth silently dropping.
@@ -892,6 +1179,84 @@ bookToggle.addEventListener("click", () => {
   bookPanel.classList.toggle("visible", bookVisible);
   bookToggle.textContent = bookVisible ? "hide" : "show";
   renderBook(bookVisible ? lastOrderbook : null, lastQuotes); // don't wait for next poll tick
+});
+
+// --- Order book column resize ---
+// Only the chart column is `1fr` in #layout's grid-template-columns; the
+// handle, book and rail are all fixed/explicit widths. That means the
+// side rail's left edge never moves while dragging — only the chart
+// shrinks or grows to absorb the change — so the book's width can be read
+// straight off the mouse position relative to the rail's stable edge,
+// with no feedback loop against the chart's own size.
+const layoutEl = document.getElementById("layout");
+const resizeHandle = document.getElementById("book-resize-handle");
+const sideEl = document.getElementById("side");
+const BOOK_WIDTH_KEY = "dashboard.bookWidthPx";
+const BOOK_WIDTH_MIN = 200;
+
+function clampBookWidth(px) {
+  // Leaves #layout's own chart min-width (300px, see grid-template-columns)
+  // room to actually apply instead of being squeezed to 0 by an oversized
+  // book on a narrow window. clientWidth includes #layout's own left+right
+  // padding (2 * var(--gap)), which isn't column space either.
+  const reserved = 20 /* layout padding */ + 300 /* chart min */ + 10 /* handle */ + 260 /* rail */ + 30 /* 3 gaps */;
+  const maxPx = Math.max(BOOK_WIDTH_MIN, layoutEl.clientWidth - reserved);
+  return Math.min(Math.max(px, BOOK_WIDTH_MIN), maxPx);
+}
+
+function setBookWidth(px, persist) {
+  const clamped = clampBookWidth(px);
+  layoutEl.style.setProperty("--book-w", `${clamped}px`);
+  if (persist) localStorage.setItem(BOOK_WIDTH_KEY, String(clamped));
+}
+
+const savedBookWidth = parseFloat(localStorage.getItem(BOOK_WIDTH_KEY));
+if (!Number.isNaN(savedBookWidth)) setBookWidth(savedBookWidth, false);
+
+// Pointer Events + setPointerCapture instead of mousedown/mousemove/mouseup
+// on window: the handle is a thin 10px hit target, and a fast real-world
+// drag (trackpad flick, not a slow mouse crawl) can move the cursor past it
+// between two move samples. Plain mouse listeners on window still receive
+// those moves, but capturing the pointer to the handle is what guarantees
+// this element keeps getting every move/up event for the gesture even once
+// the cursor has left its bounds — the standard fix for "drag stops working
+// if you move too fast", which is exactly the failure mode a 10px handle
+// invites.
+let resizingBook = false;
+resizeHandle.addEventListener("pointerdown", (e) => {
+  resizingBook = true;
+  resizeHandle.classList.add("dragging");
+  resizeHandle.setPointerCapture(e.pointerId);
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none"; // dragging shouldn't select chart labels/text
+  e.preventDefault();
+});
+resizeHandle.addEventListener("pointermove", (e) => {
+  if (!resizingBook) return;
+  // Book width = distance from the cursor to the rail's fixed left edge,
+  // read fresh every move rather than assumed constant, so a window resize
+  // mid-drag can't leave this stale.
+  const railLeft = sideEl.getBoundingClientRect().left;
+  setBookWidth(railLeft - e.clientX - 10 /* gap between book and rail */, false);
+});
+function endBookResize(e) {
+  if (!resizingBook) return;
+  resizingBook = false;
+  resizeHandle.classList.remove("dragging");
+  if (e && resizeHandle.hasPointerCapture(e.pointerId)) resizeHandle.releasePointerCapture(e.pointerId);
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
+  // Persisted only once the drag settles, not on every pixel of movement.
+  const current = getComputedStyle(layoutEl).getPropertyValue("--book-w");
+  if (current) localStorage.setItem(BOOK_WIDTH_KEY, current.trim());
+}
+resizeHandle.addEventListener("pointerup", endBookResize);
+resizeHandle.addEventListener("pointercancel", endBookResize);
+// A saved width from a wider window can overflow a narrower one on reload;
+// re-clamp against whatever viewport actually loaded this time.
+window.addEventListener("resize", () => {
+  const current = parseFloat(getComputedStyle(layoutEl).getPropertyValue("--book-w"));
+  if (!Number.isNaN(current)) setBookWidth(current, false);
 });
 
 // --- Freshness tracking ---
@@ -963,18 +1328,64 @@ function renderStatus() {
     "stale",
     numbersOnScreen && (cls === "warn" || cls === "dead")
   );
+
+  // Same clock as the rest of this function, not a second read of ob.ts —
+  // the book's own timestamp and the bot's heartbeat are the same field on
+  // the wire (both come from the bot's last viz-file write), so reusing
+  // botAgeS here is one source of truth instead of two that could disagree.
+  const bookAgeEl = document.getElementById("book-age");
+  if (bookAgeEl) bookAgeEl.textContent = botAgeS === null ? "—" : `${fmtDuration(botAgeS)} old`;
 }
 
-async function poll() {
+// True while a /snapshot request is outstanding. Over an SSH tunnel a
+// request can take several seconds — longer than POLL_MS — and the interval
+// fired regardless, so three or four identical requests piled up in flight
+// at once. That multiplies load on both the tunnel and a VPS that may
+// already be CPU-starved, making the very slowness that caused the pile-up
+// worse, and it is what makes the "live -> link down -> live" flapping
+// self-sustaining. One in flight at a time; a bot switch still forces its
+// own (see `force`), since that request supersedes whatever is pending.
+let pollInFlight = false;
+
+async function poll(force = false) {
+  if (pollInFlight && !force) return;
+  pollInFlight = true;
+  try {
+    await _poll();
+  } finally {
+    pollInFlight = false;
+  }
+}
+
+async function _poll() {
+  // Captured now, not read again after the await: the click handler fires a
+  // poll() outside the regular interval so switching feels instant, which
+  // means two requests can be in flight together (the new click's and the
+  // previous tick's still-pending one for the old bot). Without pinning the
+  // request to the bot it was actually sent for, whichever response lands
+  // last wins the race — including the stale one for the bot the user just
+  // switched away from, which would otherwise silently snap the selection
+  // back.
+  const requestedBot = currentBotKey;
   try {
     let url = `/snapshot?interval=${encodeURIComponent(currentInterval)}`;
-    if (currentBotKey) url += `&bot=${encodeURIComponent(currentBotKey)}`;
+    if (requestedBot) url += `&bot=${encodeURIComponent(requestedBot)}`;
+    // Omitted means "the running session" — the server resolves it, so a
+    // session that ends while the tab is open rolls over on its own rather
+    // than pinning the panel to a run that is over.
+    if (currentSession !== null) url += `&session=${encodeURIComponent(currentSession)}`;
     // Tell the server which history we already hold so it can answer
     // "unchanged" instead of resending thousands of identical candles.
     if (lastCandleSig) url += `&ksig=${encodeURIComponent(lastCandleSig)}`;
     const resp = await fetch(url, { cache: "no-store" });
     if (!resp.ok) throw new Error(`http ${resp.status}`);
     const data = await resp.json();
+
+    // The user picked a different bot while this request was in flight — a
+    // fresh poll for that bot is already on its way (the click handler
+    // fires one immediately), so this now-stale response is dropped rather
+    // than applied on top of it.
+    if (requestedBot !== currentBotKey) return;
 
     renderBotList(data.bots, data.server_ts, data.bot);
     renderBasis(data.basis || []);
@@ -1020,14 +1431,19 @@ async function poll() {
       // true after the bot stops and are still worth showing.
       renderCandles(venue.klines);
 
+      // A session's realised performance outlives the bot that produced it,
+      // so it is rendered either way — see renderDeadBot.
+      renderSessionBar(venue.sessions, venue.session);
+      renderStats(venue.stats, venue.session);
+      renderCurve(venue.equity_curve);
+      renderMarkout(venue.markouts);
+
       if (dead) {
         renderDeadBot(botAgeAtPollS);
       } else {
         addFillMarkers(venue.fills || [], venue.kline_interval_s);
         renderPriceLines(venue);
         renderPosition(venue);
-        renderStats(venue.stats);
-        renderCurve(venue.equity_curve);
         renderNav(venue.nav_curve);
         renderBook(bookVisible ? lastOrderbook : null, lastQuotes);
       }
@@ -1044,6 +1460,7 @@ async function poll() {
       renderPosition({ positions: [], account: null });
       renderStats(null);
       renderCurve(null);
+      renderMarkout(null);
       renderNav(null);
       renderBook(null);
       updateChartLabel();
@@ -1063,3 +1480,14 @@ setInterval(renderStatus, STATUS_TICK_MS);
 
 poll();
 setInterval(poll, POLL_MS);
+
+// Safari (WebKit) throttles setInterval hard in a backgrounded tab — a
+// click or a switch made just before tabbing away can sit unconfirmed for
+// however long the tab was hidden, which reads as "stuck on the old bot"
+// exactly like the tunnel-latency case above, just triggered by tab focus
+// instead of network speed. Firing one poll the instant the tab becomes
+// visible again means coming back never waits on a throttled timer to
+// catch up on its own.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") poll(true);
+});

@@ -5,11 +5,12 @@ fleet — Bitunix, Coinbase and OKX legs, whichever of them are running.
 
 It renders a candlestick chart (real klines from whichever venue the
 selected bot trades on, with a volume histogram) with buy/sell fill markers,
-the bot's own resting quotes and entry prices drawn as price lines, a
-position & margin panel, a performance panel, a toggleable order book, and a
-Curve/Delta/Volume/NAV panel pair — cumulative realised PnL, running
-inventory, cumulative traded notional and account equity, each as a mini
-chart instead of just a single number. The backend is a single FastAPI route
+the bot's own resting quotes and entry prices drawn as price lines, and,
+directly under the chart, a Curve/Delta/Volume panel — cumulative realised
+PnL, running inventory and cumulative traded notional, each as a mini chart
+laid out side by side instead of just a single number. A side rail carries
+the bot list, cross-venue basis, incidents, order book, position & margin,
+performance panel and NAV. The backend is a single FastAPI route
 (`/snapshot`) that the frontend polls; everything else is a static file.
 
 ## Freshness is a first-class signal
@@ -56,7 +57,9 @@ config.py                 paths, symbols, venue registry (all env-overridable)
 adapters/
   base.py                 shared dataclasses
   discovery.py            finds bots by scanning for the files they write
-  stats.py                FIFO realised PnL + fill metrics (pure, no I/O)
+  stats.py                FIFO realised PnL + cash-flow PnL + fill metrics (pure, no I/O)
+  sessions.py             pure: session bounds, read from the tracker's own session log
+  markouts.py             pure: post-fill mid drift per horizon, signed by side
   bot_files.py            reads one bot's state (orderbook, positions, fills, quotes)
   basis.py                pure: pairs legs sharing a base asset, mid gap in bps
   bitunix_account.py      Bitunix REST, signed, GET-only (margin/equity)
@@ -81,6 +84,134 @@ is by normalised base asset (`SOLUSDT` and `SOL-USD` both key to `SOL`); two
 legs on the *same* exchange are never paired, since that would be a naming
 collision, not a basis. See `adapters/basis.py`.
 
+A leg's mid is only used while it is fresh. The mid comes from the bot's own
+published book, so it *freezes* rather than disappears when that bot stops —
+and a frozen mid paired against a live one yields a large, stable, entirely
+fictional basis whose sparkline still moves (because the live leg moves).
+Any leg older than `BASIS_MAX_AGE_S` (30s) is therefore dropped before
+pairing and listed by name with its age, so the panel says what it refused
+to price instead of quietly showing fewer rows. Each surviving pair also
+carries the **skew** between its two mids: the legs are not sampled at the
+same instant (on this fleet, ~0.3s old on Bitunix vs ~12s on Coinbase), and
+on a fast asset that skew is worth bps of its own — the same order of
+magnitude as the basis itself.
+
+## Performance is measured per session
+
+A session is one run of the bot. The Performance panel covers the running
+session by default, with a dropdown to read back any earlier one — and a
+stopped bot keeps its sessions, since what it did last night is settled
+history, not a stale reading (only its live panels — book, position, NAV —
+are refused once it dies).
+
+Bounds are **not** detected here. This fleet already runs a session recorder
+next to each bot (`v17mm-tracker.service`, started and stopped by the same
+unit), which appends `start,end,clean_exit,…` to `sessions*_all.csv` beside
+the fill ledger. Those bounds come from the process lifecycle itself, so
+`adapters/sessions.py` reads them rather than guessing. Only the *bounds*
+are taken from that file: every figure is recomputed here from the fills,
+because the tracker's own PnL uses different conventions and two different
+numbers for the same session would be worse than the problem this dashboard
+exists to solve. The one session the CSV cannot contain is the running one
+(its row is written on shutdown), so that start comes from watching the bot
+come back to life, or failing that from its first fill since the previous
+session ended — the panel says which.
+
+Fills *before* the session start are still replayed, without being counted.
+A bot almost never restarts flat, so a window that simply dropped them would
+open at inventory 0 while the exchange holds a real position, and the
+session's first sells would match against lots that were never bought. What
+that rebuild produces is then checked against the inventory the bot itself
+recorded on the session's first fill; if they disagree, the ledger doesn't
+reach back far enough and the realised figure is refused rather than shown.
+
+### Two PnL figures, on purpose
+
+| | `realised net` | `session pnl (cash)` |
+|---|---|---|
+| Method | FIFO round-trip matching | cash in − cash out ± inventory marked |
+| Hedge mode | refused — FIFO cannot tell which book a fill moved | unaffected, it matches nothing |
+| Open inventory | excluded | included, marked at the last mid |
+
+The Bitunix leg runs a long and a short simultaneously as a matter of
+course, so its realised figure is permanently and correctly refused — which
+left the venue doing most of the volume with no answer at all. The cash-flow
+figure answers without matching lots. It is not the same number and is never
+relabelled as one: it marks open inventory to market, so the two converge
+only when a session ends flat, and the gap between them *is* the open
+exposure. Cross-checked against the account's own equity delta on five live
+sessions: the three whose opening inventory came from the ledger agreed to
+within 0.15 USD.
+
+It is withheld where the ledger's inventory is not denominated in the same
+units as its fill sizes — OKX rows count contracts while `size` counts base,
+which valued a 10-SOL book as a 1026-SOL one.
+
+`capture` is withheld when the flow is more than 55/45 one-sided: past that
+it measures where price went between the buying and the selling, not what
+the quotes earned.
+
+## Markout
+
+The measure that separates market making from being picked off. A maker
+earns the spread at the moment of the fill and keeps it only if the mid
+doesn't walk away afterwards; `capture` is measured at t=0 and is silent on
+that. The tracker already sampled the mid at 100ms/1s/5s/10s/30s after every
+fill (`markouts.jsonl`) — nothing read it until this panel.
+
+Signed so positive always means the market moved your way, reported per
+horizon and split by side (a book run over on one side only is a real and
+common failure that a blended average hides).
+
+Only *relative* movement is computed — both terms share the mid at fill —
+and the absolute edge (fill price vs mid) deliberately is not. `fill_mid` is
+captured when the fill is processed, i.e. after execution, so a passive
+maker's own fill removes its level and the mid recoils against it: measured
+here, that made 50% of Bitunix and 59% of Coinbase fills *look* like they
+executed on the wrong side of the mid. Any absolute edge built on that field
+inherits the artefact; differences cancel it.
+
+Markout rows carry `venue` but no `symbol`, so they are matched to this
+bot's fills by `trade_id` when the venue carries more than one symbol, and
+by venue + time window when it carries only one (Coinbase's tracker
+aggregates fills per order while markouts are per execution, so the ids
+genuinely don't correspond there). The panel says which was used.
+
+Note that `side` casing differs *between venues in the same file* —
+`BUY`/`SELL` on Bitunix, `buy`/`sell` on Coinbase. Normalising it is not
+cosmetic: comparing against `"buy"` alone reads every Bitunix buy as a sell
+and inverts the sign of the result.
+
+## Fees
+
+Fee sign conventions differ by venue: Bitunix and Coinbase record a charged
+fee as positive, OKX records a charge as *negative* (positive means rebate).
+`adapters/bot_files.py` normalises every fee to a positive cost at ingestion,
+so `realised_net = realised_gross - fees` subtracts what was actually paid.
+Read raw, OKX's convention made the dashboard add fees to PnL: a real
+-0.80 USD showed as +5.20 over a 931-fill window. A venue that genuinely
+pays a rebate needs explicit signed handling there — not an inferred sign.
+
+## Contracts vs base units
+
+Position sizes are not in the same unit on every venue, and the field name
+does not say so: the OKX engine publishes `net_position_base: 2489` while
+holding **24.89 SOL** — its instrument is denominated in contracts of 0.01
+SOL. Compared raw against a fills replay, which *is* in base units, the
+reliability check could only ever fail; it refused the Curve, Delta and
+Performance panels for a reason that had nothing to do with the ledger.
+
+`adapters/bot_files.py` scales the viz position by `contract_value`, read
+from the fill ledger itself — the tracker writes it on every row, having
+got it from the venue's own instrument definition. Deliberately *not*
+configured in this repo: a second copy of that number here would be a guess
+that goes stale the day a bot changes instrument. A ledger that declares
+nothing is left unscaled (`1.0`), which keeps the failure pointing the safe
+way — the replay disagrees with the position and the panel refuses, rather
+than showing a converted number nobody can defend. And when the two differ
+by an exact round factor of 10 or more, the refusal says so: that shape is a
+unit mismatch, not a missing history.
+
 ## Portfolio row & incident timeline
 
 The bot list doubles as a unified portfolio table: each row shows the bot's
@@ -99,17 +230,49 @@ observation of a bot is discovery, not an incident, so it is never logged.
 
 ## Reading the performance panel
 
-Every figure is computed over a **bounded window** — the last N fills the
-adapter holds — and the panel header states the window it actually covers.
-`realised gross` is FIFO round-trip PnL with fees excluded; `fees` are what
-the venue reported per fill; `realised net` is the only number that reflects
-a result. Open inventory is deliberately *not* marked to market, and is shown
-separately, so a settled figure is never mixed with a floating one. The limits
-of this calculation are documented at the top of `adapters/stats.py`.
+Every figure covers one session, and the panel header names it. `realised
+gross` is FIFO round-trip PnL with fees excluded; `fees` are what the venue
+reported per fill, normalised to a cost; `realised net` is the settled
+result. Open inventory is deliberately *not* marked to market there, and is
+shown separately, so a settled figure is never mixed with a floating one —
+`session pnl (cash)` is the figure that does include it, labelled. The limits
+of both calculations are documented at the top of `adapters/stats.py`.
+
+Three distinct states, deliberately not collapsed into one:
+
+- **refused** (`pnl_unreliable`) — positive evidence the figure would be
+  wrong: a gap in the engine's own fill counter, hedge mode, a ledger that
+  disagrees with the exchange, an opening position the pre-roll couldn't
+  rebuild. The number is withheld and the reason shown.
+
+  The counter is the only one of those that *proves* rather than infers.
+  The trackers sample the bot's recent-fills deque on a timer, so a fill
+  they never sampled leaves no trace at all — the loss used to surface much
+  later, and only as an inventory the ledger disagreed with. Each engine now
+  stamps every fill it records with `fill_seq` (plus a `fill_run_id`
+  scoping it to one process), so consecutive rows of one run must differ by
+  exactly 1 and a hole is countable: *"3 fill(s) the recorder never wrote
+  down"*. It is checked over the reported window only — a hole from last
+  week does not make tonight unmeasurable — it says nothing about rows
+  written before the engines emitted it, and it cannot see fills that
+  happened while the bot itself was down. It proves a ledger has holes,
+  never that it has none.
+- **unverified** (`pnl_unverified`) — no way to check it either way, because
+  the bot publishes no position to compare the replay against. The number is
+  shown, with the caveat. This state exists because conflating it with
+  "fine" made the Coinbase leg the one PnL on screen presented as
+  trustworthy, precisely because it was the only one that could not be
+  tested.
+- **clean** — the replay was checked against the exchange and agreed.
 
 ## Curve, Delta, Volume & NAV
 
-Four running series, built from the same data two different ways:
+Four running series, built from the same data two different ways. Curve,
+Delta and Volume sit in their own panel directly under the main chart, side
+by side rather than stacked — they're a replay of the same fills the chart
+already shows, so they read better next to it than buried in the side rail.
+NAV stays in the side rail, next to Position & Margin, since it comes from
+the account adapter rather than the fill replay.
 
 - **Curve** (cumulative realised PnL) and **Delta** (running inventory) are
   the Performance panel's FIFO replay (`adapters/stats.py:equity_curve`),
@@ -127,12 +290,27 @@ Four running series, built from the same data two different ways:
   Curve/Delta have refused, e.g. right after a restart before the ledger has
   caught up with the exchange.
 - **NAV** (account equity) is different in kind: it's not derived from fills
-  at all, it's `available + margin_used + unrealised_pnl` off each venue's
-  own account adapter (OKX reports equity directly; Bitunix and Coinbase
-  derive it the same way). Because it isn't a replay of stored fills, there
-  is no ledger to rebuild history from — the curve is whatever this
-  dashboard has sampled, one point per poll, while it's been open. A first
-  load on a freshly started dashboard starts with one point, not history.
+  at all, it's `available + frozen + margin_used + unrealised_pnl` off each
+  venue's own account adapter. `frozen` — capital locked by *resting orders*
+  — is in that sum because leaving it out is not a rounding error: on
+  Bitunix it held 92.43 USDT against an `available` of 1.73, so the panel
+  reported a 14.42 NAV on a 106.95 account and made it lurch every time the
+  bot placed or pulled a quote. An equity that omits order-locked capital
+  measures quoting activity, not net assets.
+
+  **The scope is not the same on every venue**, so it is printed next to the
+  figure rather than assumed: Bitunix is the futures account, Coinbase is a
+  quote-currency balance that excludes the base asset held, OKX is one
+  settlement currency out of the twelve that account holds (its venue-wide
+  `totalEq` is shown separately as "account total", never folded in — it
+  spans products this bot has nothing to do with). Summing the three NAVs
+  across venues does not produce a portfolio value.
+
+  Because it isn't a replay of stored fills, there is no ledger to rebuild
+  history from — the curve is whatever this dashboard has sampled, one point
+  per poll, while a browser has been open, and the header states that span.
+  It is minutes long, it shrinks when several tabs share the buffer, and it
+  does not accumulate at all while nobody is watching.
 
 ## Tests
 

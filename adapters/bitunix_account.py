@@ -75,20 +75,36 @@ class BitunixAccountAdapter:
             return self._cached
 
         item = items[0]
-        try:
-            available = float(item.get("available") or 0.0)
-            margin_used = float(item.get("margin") or 0.0)
-            cross_upnl = float(item.get("crossUnrealizedPNL") or 0.0)
-        except (TypeError, ValueError):
-            return self._cached
+
+        def _f(key: str) -> float:
+            try:
+                return float(item.get(key) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        available = _f("available")
+        margin_used = _f("margin")
+        # Both halves, not just the cross one. This account runs its
+        # positions in isolated mode, so `crossUnrealizedPNL` reads 0.00
+        # while `isolationUnrealizedPNL` carries the actual figure — reading
+        # only the first reported "no unrealised PnL" on a bot that had some.
+        upnl = _f("crossUnrealizedPNL") + _f("isolationUnrealizedPNL")
+        # The missing 87%: measured live 2026-08-12, `frozen` held 92.43 USDT
+        # against an `available` of 1.73 and a `margin` of 12.68. Omitting it
+        # reported a 14.42 NAV on a 106.95 account, and made that NAV lurch
+        # every time the bot placed or pulled a quote.
+        frozen = _f("frozen")
 
         self._cached = {
             "available": available,
             "margin_used": margin_used,
-            "unrealised_pnl": cross_upnl,
-            # Bitunix doesn't expose a single equity field (unlike OKX's
-            # "eq") — derived the same way OKX's own margin_used is derived,
-            # so the two venues' NAV panels agree on what the number means.
-            "equity": available + margin_used + cross_upnl,
+            "frozen": frozen,
+            "unrealised_pnl": upnl,
+            # `bonus` is spendable margin the venue granted; `transfer` is
+            # deliberately excluded — it mirrors `available` (both read
+            # 1.7342580352669438 live) and adding it would double-count.
+            "equity": available + frozen + margin_used + upnl + _f("bonus"),
+            "equity_scope": f"{self._margin_coin} futures account",
+            "account_equity_total": None,
         }
         return self._cached

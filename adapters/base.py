@@ -74,13 +74,29 @@ class Position(TypedDict):
 class Account(TypedDict):
     available: float
     margin_used: float
+    # Capital locked by *resting orders*, as opposed to `margin_used`, which
+    # backs open positions. Kept separate because leaving it out entirely is
+    # what made the Bitunix NAV swing 6.24 USD on an 18 USD account in 8
+    # minutes while SOL moved 0.29%: `frozen` rises as the bot places quotes
+    # and falls as it cancels them, so an equity that omits it is measuring
+    # order state, not net assets. 0.0 on venues with no such concept.
+    frozen: float
     unrealised_pnl: float
-    # Net asset value: available + margin_used + unrealised_pnl. OKX reports
-    # this directly ("eq"); Bitunix and Coinbase don't expose an equivalent
-    # field, so their adapters derive it the same way margin_used is already
-    # derived on OKX — one formula, three venues, so a NAV panel reads the
-    # same regardless of which adapter fed it.
+    # Net asset value, in the margin currency: available + frozen +
+    # margin_used + unrealised_pnl. Every venue derives it the same way so a
+    # NAV panel reads the same regardless of which adapter fed it — OKX's
+    # own "eq" for a currency is exactly this sum too.
     equity: float
+    # What `equity` actually covers, in plain words, because it is NOT the
+    # same scope on every venue and pretending otherwise is worse than no
+    # panel: Bitunix is a futures account, Coinbase is a quote-currency spot
+    # balance that excludes the base asset held, OKX is one settlement
+    # currency out of twelve. Rendered next to the figure.
+    equity_scope: str
+    # Venue-wide equity across every currency, where the venue reports one
+    # (OKX's `totalEq`). None elsewhere. Never mixed into `equity`: it spans
+    # products this bot has nothing to do with.
+    account_equity_total: float | None
 
 
 class Candle(TypedDict):

@@ -58,7 +58,10 @@ def test_get_account_finds_matching_quote_currency():
     client = _FakeClient([_FakeAccount("USDC", "100.5", "10.0"), _FakeAccount("SOL", "3.0", "0.0")])
     acc = _adapter(client).get_account()
     assert approx(acc["available"], 100.5)
-    assert approx(acc["margin_used"], 10.0)
+    # Spot has no position margin: what's held is held by resting orders,
+    # which is `frozen` on every venue here.
+    assert approx(acc["margin_used"], 0.0)
+    assert approx(acc["frozen"], 10.0)
     assert acc["unrealised_pnl"] == 0.0  # spot: always 0.0, never a real figure
     # equity = available + held: quote-currency NAV, doesn't see base-asset
     # inventory value (documented limitation, not a bug).

@@ -139,7 +139,19 @@ class BitunixKlineAdapter:
         # a handful of bars just because the bot started recently.
         target = min(target, now - self._limit * step)
 
-        needs_history = not bars or (min(bars) > target + step and len(bars) < MAX_CANDLES)
+        # A venue serves a finite amount of history — Bitunix returns roughly
+        # 1800 1m bars — so a bot whose first fill predates that can never
+        # reach `target`, and `needs_history` would stay true forever. That
+        # turned the poll-interval cache into a no-op: every single poll
+        # re-issued the same page requests that had already come back empty,
+        # adding seconds of REST latency per request and never gaining a bar.
+        # Once a page below our oldest bar comes back empty we record that
+        # floor and stop asking, which is what makes the cache actually cache.
+        history_floor = entry.get("history_floor")
+        at_floor = history_floor is not None and bars and min(bars) <= history_floor
+        needs_history = not bars or (
+            min(bars) > target + step and len(bars) < MAX_CANDLES and not at_floor
+        )
         if now - entry["last_poll_ts"] < self._poll_interval_s and not needs_history:
             return self._materialise(entry)
         entry["last_poll_ts"] = now
@@ -149,15 +161,22 @@ class BitunixKlineAdapter:
         for c in self._fetch_page(interval, None):
             bars[c["time"]] = c
 
+        # `not at_floor` here too, not just in the cache check above: once the
+        # poll interval elapses we still refresh the recent page, and without
+        # this the loop would re-ask for history below a floor already known
+        # to be empty every single time it did.
         pages = 0
-        while bars and min(bars) > target + step and pages < MAX_PAGES_PER_CALL:
+        while bars and min(bars) > target + step and pages < MAX_PAGES_PER_CALL and not at_floor:
             if len(bars) >= MAX_CANDLES:
                 break
             oldest_ms = min(bars) * 1000
             page = self._fetch_page(interval, oldest_ms)
             page = [c for c in page if c["time"] * 1000 < oldest_ms]
             if not page:
-                break  # venue has no more history; stop rather than loop
+                # Venue has no more history below this point. Remember where
+                # that floor is so later polls don't re-ask (see above).
+                entry["history_floor"] = min(bars)
+                break
             for c in page:
                 bars[c["time"]] = c
             pages += 1

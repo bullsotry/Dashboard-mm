@@ -52,9 +52,48 @@ def test_get_account_parses_balance_and_derives_equity(monkeypatch):
     assert approx(acc["available"], 60.0)
     assert approx(acc["margin_used"], 35.0)
     assert approx(acc["unrealised_pnl"], 5.0)
-    # Bitunix has no single equity field (unlike OKX's "eq"); derived the
-    # same way OKX's own margin_used is derived: available + margin + upnl.
+    # Bitunix has no single equity field (unlike OKX's "eq"); derived as
+    # available + frozen + margin + upnl + bonus.
     assert approx(acc["equity"], 100.0)
+
+
+def test_equity_counts_frozen_and_isolated_upnl(monkeypatch):
+    """The live 2026-08-12 response, verbatim. Reading only
+    available+margin+crossUnrealizedPNL reported 14.42 on an account
+    actually holding 106.95 — 87% of it sitting in `frozen`, which rises
+    and falls as the bot places and cancels quotes, so the NAV lurched with
+    order state instead of with net assets.
+
+      1.7342580352669438  available
+    + 92.4299858104473882 frozen
+    + 12.6842845663654454 margin
+    +  0.0                crossUnrealizedPNL   (positions are isolated)
+    +  0.1051843842029562 isolationUnrealizedPNL
+    +  0.0                bonus
+    = 106.9537127962827336
+    """
+    payload = {
+        "data": [
+            {
+                "available": "1.7342580352669438",
+                "bonus": "0",
+                "crossUnrealizedPNL": "0",
+                "frozen": "92.4299858104473882",
+                "isolationUnrealizedPNL": "0.1051843842029562",
+                "margin": "12.6842845663654454",
+                "marginCoin": "USDT",
+                "positionMode": "HEDGE",
+                # Mirrors `available`; must not be added or it double-counts.
+                "transfer": "1.7342580352669438",
+            }
+        ]
+    }
+    monkeypatch.setattr(bitunix_account.requests, "get", lambda *a, **kw: _FakeResponse(payload))
+    acc = _adapter().get_account()
+    assert approx(acc["frozen"], 92.4299858104473882)
+    assert approx(acc["unrealised_pnl"], 0.1051843842029562)
+    assert approx(acc["equity"], 106.9537127962827336, tol=1e-9)
+    assert acc["equity_scope"] == "USDT futures account"
 
 
 def test_get_account_request_exception_keeps_cache(monkeypatch):

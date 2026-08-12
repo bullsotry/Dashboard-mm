@@ -20,6 +20,15 @@ exist" (50119) even though the IPv4 address is correctly whitelisted —
 confirmed live on this dashboard's own Tokyo VPS. `_IPv4HTTPSConnection` is
 the same fix v17mm OKX's okx_client.py uses, ported here rather than
 imported so this adapter has no dependency on the bot's codebase.
+
+Host defaults to `eea.okx.com`, not `www.okx.com`, for the same reason:
+OKX routes *private* endpoints by regional domain, not just key/IP.
+`www.okx.com` returns 50119 "API key doesn't exist" for an EEA-registered
+key even with a fully correct signature — confirmed via OKX support
+2026-08-05 (see v17mm OKX's okx_client.py) and reproduced live by this
+adapter on 2026-08-10 (account/balance 401/50119 against www.okx.com,
+200 against eea.okx.com, same credentials, same request). Overridable via
+OKX_API_HOST for an account registered in a different region.
 """
 
 from __future__ import annotations
@@ -36,7 +45,7 @@ from datetime import datetime, timezone
 
 from .base import Account
 
-_HOST = "www.okx.com"
+_DEFAULT_HOST = "eea.okx.com"
 _BALANCE_PATH = "/api/v5/account/balance"
 
 
@@ -77,8 +86,8 @@ class _IPv4HTTPSConnection(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
 
 
-def _get_ipv4(path: str, headers: dict, timeout_s: float) -> tuple[int, bytes]:
-    conn = _IPv4HTTPSConnection(_HOST, 443, timeout=timeout_s, context=ssl.create_default_context())
+def _get_ipv4(host: str, path: str, headers: dict, timeout_s: float) -> tuple[int, bytes]:
+    conn = _IPv4HTTPSConnection(host, 443, timeout=timeout_s, context=ssl.create_default_context())
     try:
         conn.request("GET", path, headers=headers)
         resp = conn.getresponse()
@@ -95,12 +104,14 @@ class OkxAccountAdapter:
         passphrase: str,
         margin_coin: str = "USDC",
         poll_interval_s: float = 5.0,
+        host: str = _DEFAULT_HOST,
     ):
         self._api_key = api_key
         self._secret_key = secret_key
         self._passphrase = passphrase
         self._margin_coin = margin_coin
         self._poll_interval_s = poll_interval_s
+        self._host = host
         self._cached: Account | None = None
         self._last_poll_ts = 0.0
 
@@ -122,7 +133,7 @@ class OkxAccountAdapter:
             "Content-Type": "application/json",
         }
         try:
-            status, body = _get_ipv4(request_path, headers, timeout_s=5.0)
+            status, body = _get_ipv4(self._host, request_path, headers, timeout_s=5.0)
             if status != 200:
                 return self._cached
             payload = json.loads(body)
@@ -132,6 +143,16 @@ class OkxAccountAdapter:
         rows = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(rows, list) or not rows:
             return self._cached
+
+        # Account-wide equity across every currency, in USD. Reported
+        # alongside, never folded into `equity`: this account holds twelve
+        # currencies (3995.70 USD total live) of which only the settlement
+        # one has anything to do with this bot.
+        try:
+            total_eq = float(rows[0].get("totalEq") or 0.0) or None
+        except (TypeError, ValueError):
+            total_eq = None
+
         details = [d for d in (rows[0].get("details") or []) if isinstance(d, dict)]
         detail = next((d for d in details if str(d.get("ccy") or "").upper() == self._margin_coin), None)
         if detail is None:
@@ -150,16 +171,22 @@ class OkxAccountAdapter:
         equity = _f("eq")
         available = _f("availEq", "availBal", "cashBal")
         upnl = _f("upl")
-        # Residual = whatever's locked up backing open positions, including
-        # any uPnL not already reflected in availEq. Mirrors the "margin"
-        # field's meaning on the Bitunix adapter: not a venue-native field,
-        # a derived one, so the two panels read the same way.
-        margin_used = max(0.0, equity - available - upnl)
+        # OKX reports what's locked as one number (`frozenBal`) without
+        # splitting order-locked from position-margin, so it lands in
+        # `frozen` — the field whose absence broke the Bitunix NAV — and
+        # `margin_used` keeps only whatever `eq` accounts for beyond it.
+        frozen = _f("frozenBal", "ordFrozen")
+        margin_used = max(0.0, equity - available - upnl - frozen)
 
         self._cached = {
             "available": available,
             "margin_used": margin_used,
+            "frozen": frozen,
             "unrealised_pnl": upnl,
             "equity": equity,
+            # Named, because it is one currency out of however many the
+            # account holds — the panel used to present it as "the" NAV.
+            "equity_scope": f"{self._margin_coin} only",
+            "account_equity_total": total_eq,
         }
         return self._cached

@@ -90,11 +90,17 @@ class CoinbaseAccountAdapter:
 
         self._cached = {
             "available": available,
-            "margin_used": held,
+            # Spot has no position margin; what's held is held by resting
+            # orders, which is exactly what `frozen` means on the other
+            # venues.
+            "margin_used": 0.0,
+            "frozen": held,
             "unrealised_pnl": 0.0,
             # Quote-currency NAV only — same narrowing as the rest of this
             # adapter's docstring: a spot base-asset holding doesn't show up
             # here, only the quote balance free or held by open orders.
             "equity": available + held,
+            "equity_scope": f"{self._quote} balance only (excludes base asset held)",
+            "account_equity_total": None,
         }
         return self._cached

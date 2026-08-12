@@ -41,6 +41,27 @@ def _adapter():
     return OkxAccountAdapter(api_key="k", secret_key="s", passphrase="p", poll_interval_s=0.0)
 
 
+def test_default_host_is_eea_not_www():
+    # www.okx.com returns 50119 "API key doesn't exist" for an EEA-registered
+    # key even with a correct signature (confirmed live, see module
+    # docstring) — the default must route private calls to eea.okx.com.
+    assert _adapter()._host == "eea.okx.com"
+
+
+def test_host_is_overridable_and_reaches_get_ipv4(monkeypatch):
+    seen_host = {}
+    payload = {"data": [{"details": [{"ccy": "USDC", "eq": "1.0", "availEq": "1.0", "upl": "0.0"}]}]}
+
+    def fake_get_ipv4(host, path, headers, timeout_s):
+        seen_host["host"] = host
+        return 200, json.dumps(payload).encode()
+
+    monkeypatch.setattr(okx_account, "_get_ipv4", fake_get_ipv4)
+    a = OkxAccountAdapter(api_key="k", secret_key="s", passphrase="p", poll_interval_s=0.0, host="www.okx.com")
+    assert a.get_account() is not None
+    assert seen_host["host"] == "www.okx.com"
+
+
 def test_get_account_parses_balance_and_derives_margin_used(monkeypatch):
     payload = {"data": [{"details": [{"ccy": "USDC", "eq": "100.0", "availEq": "60.0", "upl": "5.0"}]}]}
     monkeypatch.setattr(okx_account, "_get_ipv4", lambda *a, **kw: (200, json.dumps(payload).encode()))

@@ -130,7 +130,15 @@ class CoinbaseKlineAdapter:
         # ago still gets a chart with something to read.
         target = min(target, now - _PAGE_ROWS * step)
 
-        needs_history = not bars or (min(bars) > target + step and len(bars) < MAX_CANDLES)
+        # See bitunix_klines.get_klines for why this floor exists: a venue's
+        # history is finite, so a bot older than it can never reach `target`,
+        # and without remembering the floor `needs_history` stays true
+        # forever and defeats the poll-interval cache on every request.
+        history_floor = entry.get("history_floor")
+        at_floor = history_floor is not None and bars and min(bars) <= history_floor
+        needs_history = not bars or (
+            min(bars) > target + step and len(bars) < MAX_CANDLES and not at_floor
+        )
         if now - entry["last_poll_ts"] < self._poll_interval_s and not needs_history:
             return self._materialise(entry)
         entry["last_poll_ts"] = now
@@ -141,13 +149,16 @@ class CoinbaseKlineAdapter:
             bars[c["time"]] = c
 
         pages = 0
-        while bars and min(bars) > target + step and pages < MAX_PAGES_PER_CALL:
+        # `not at_floor` here too — see bitunix_klines for why the loop
+        # must respect the floor, not just the cache check above.
+        while bars and min(bars) > target + step and pages < MAX_PAGES_PER_CALL and not at_floor:
             if len(bars) >= MAX_CANDLES:
                 break
             oldest = min(bars)
             page = [c for c in self._fetch_page(interval, oldest) if c["time"] < oldest]
             if not page:
-                break  # venue has no more history; stop rather than loop
+                entry["history_floor"] = min(bars)  # venue has no more history
+                break
             for c in page:
                 bars[c["time"]] = c
             pages += 1

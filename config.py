@@ -26,25 +26,72 @@ VIZ_GLOBS = os.environ.get(
     "/root/bots/*/*/.*viz*.json:/root/bots/*/.*viz*.json",
 ).split(":")
 
+# `fills*.jsonl`, not just `fills.jsonl`: a fleet commonly runs one tracker
+# per venue writing separate ledgers into the same directory (e.g.
+# fills.jsonl for bitunix+coinbase, fills_okx.jsonl for OKX) — all of them
+# get tailed, each bot's own venue/symbol filter sorts out which rows are
+# its. Anything a tracker names as a `.bak-*` snapshot doesn't end in
+# `.jsonl` so it's excluded automatically.
 FILLS_GLOBS = os.environ.get(
     "FILLS_GLOBS",
-    "/root/.*_tracker/fills.jsonl:/root/bots/*/fills.jsonl",
+    "/root/.*_tracker/fills*.jsonl:/root/bots/*/fills*.jsonl",
 ).split(":")
 
 # How often the filesystem is rescanned for new or vanished bots. This is
 # the worst-case delay between a bot starting and appearing on screen.
 DISCOVERY_INTERVAL_S = float(os.environ.get("DISCOVERY_INTERVAL_S", "15.0"))
 
-# How many fills each bot keeps for its performance window. Larger windows
-# make realised PnL less distorted by truncation (the lots that opened the
-# current position are more likely to fall inside the window) at the cost of
-# memory per bot.
-FILLS_MAXLEN = int(os.environ.get("FILLS_MAXLEN", "2000"))
+# Path fragments that disqualify a discovered state file. Shadow/paper
+# directories publish the same `exchange`+`product_id` as the live bot they
+# mirror, so they collide on the same bot key — and discovery resolves a
+# collision by file mtime. While the live bot is running it wins, but the
+# moment it stops, its stale twin takes over the key and the dashboard shows
+# the shadow's numbers under the live bot's name, with no visible change.
+# Observed on this fleet: /root/bots/v17mm_okx_shadow/ carries bitunix,
+# coinbase and okx viz files duplicating all three live legs.
+DISCOVERY_EXCLUDE = [
+    p for p in os.environ.get("DISCOVERY_EXCLUDE", "_shadow:_paper:_backtest").split(":") if p
+]
+
+# How many fills each bot keeps in memory. This is a memory ceiling, not an
+# analysis window: performance is reported per session (see
+# adapters/sessions.py), and the fills *before* a session start are still
+# needed — they are replayed to rebuild the FIFO lots the session opened
+# holding, without which a session that starts mid-position prices its exits
+# against inventory that was never bought.
+#
+# At 2000 this ceiling was the analysis window, and it truncated: the Bitunix
+# ledger holds 5487 rows for this symbol, so the replay began mid-position and
+# landed on +2.58 base against the exchange's +3.02 — which is exactly the
+# gap that made the dashboard refuse to show a PnL at all. 20000 covers every
+# ledger this fleet currently has, at roughly 3MB per bot. If it ever does
+# bite, the opening-inventory check fails visibly rather than silently
+# producing a wrong number.
+FILLS_MAXLEN = int(os.environ.get("FILLS_MAXLEN", "20000"))
 
 # How many samples the basis sparkline keeps per venue pair. At the default
 # 1.5s frontend poll this is ~6 minutes of history — enough to see a basis
 # actually moving, not just its instantaneous value.
 BASIS_HISTORY_LEN = int(os.environ.get("BASIS_HISTORY_LEN", "240"))
+
+# Most points the Curve/Delta/Volume series are sent with. The replay itself
+# is never thinned — this only bounds what crosses the wire, since a mini
+# chart a couple of hundred pixels wide cannot draw more. A busy session hit
+# 4447 points = 976KB of a 1296KB response, resent every poll; see
+# server._decimate_curve, which keeps each bucket's extremes so the envelope
+# (and the drawdown it shows) survives the thinning.
+CURVE_MAX_POINTS = int(os.environ.get("CURVE_MAX_POINTS", "600"))
+
+# How old a leg's mid may be and still be worth comparing against another
+# venue's. Deliberately *not* BOT_STALE_S: that threshold judges whether a
+# bot is healthy, this one judges whether a price is still a price. Measured
+# on this fleet 2026-08-12 (n=40 samples/leg), the published mid's age is
+# ~0.3s median on Bitunix but ~12s median and 20.4s worst-case on Coinbase,
+# which writes its viz less often — a 15s cut would blank the one real pair
+# half the time. 30s keeps every live leg while still excluding the failure
+# this exists for: a leg frozen for hours by a stopped bot, which paired
+# against a live one produced +518 bps of pure fiction (see adapters/basis.py).
+BASIS_MAX_AGE_S = float(os.environ.get("BASIS_MAX_AGE_S", "30.0"))
 
 # Same idea for the NAV (account equity) sparkline: one sample per snapshot
 # poll per bot, kept across polls so the panel isn't empty on the first
@@ -119,6 +166,9 @@ def build_account_adapter(exchange: str, symbol: str):
             secret_key=secret_key,
             passphrase=passphrase,
             poll_interval_s=ACCOUNT_POLL_INTERVAL_S,
+            # eea.okx.com by default (see adapters/okx_account.py's module
+            # docstring) — override for an account registered outside the EEA.
+            host=os.environ.get("OKX_API_HOST", "eea.okx.com"),
         )
     if exchange == "coinbase":
         # COINBASE_KEY_FILE matches the env var name the bot itself already

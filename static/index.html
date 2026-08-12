@@ -59,15 +59,43 @@
 
   #layout {
     display: grid;
-    /* The chart is the content; the rail is support. Narrower than it was,
-       so the chart gets the width back. */
-    grid-template-columns: minmax(0, 1fr) 250px;
+    /* Chart absorbs whatever width the other three columns don't use
+       (minmax(0,1fr)), the handle is a draggable divider, order book width
+       is a JS-controlled custom property (dragged live, persisted, see
+       the resize script below), and the rail is fixed. Because only the
+       chart column is 1fr, dragging the handle changes the book's width
+       without moving the side rail's left edge — that's what makes the
+       book resizable while keeping the rail a stable drop target. */
+    grid-template-columns: minmax(300px, 1fr) 10px minmax(200px, var(--book-w, 400px)) 260px;
     gap: var(--gap);
     padding: var(--gap);
     flex: 1 1 auto;
     min-height: 0;
   }
   #chart-pane { display: flex; flex-direction: column; min-height: 0; }
+  #book-pane { display: flex; flex-direction: column; min-height: 0; }
+
+  /* The drag handle sits in its own grid column instead of on top of the
+     gap, so its hit area is real and doesn't fight the gap's own spacing. */
+  #book-resize-handle {
+    cursor: col-resize; position: relative; min-width: 0;
+    /* Pointer capture (see app.js) makes the drag itself track past this,
+       but touch-action still needs to stop the browser's own scroll/zoom
+       gesture recognizer from grabbing a trackpad drag before pointerdown
+       even fires. */
+    touch-action: none;
+  }
+  #book-resize-handle::before {
+    content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 2px;
+    transform: translateX(-50%); background: var(--panel-border);
+    transition: background 0.1s;
+  }
+  #book-resize-handle:hover::before, #book-resize-handle.dragging::before {
+    background: var(--accent); width: 3px;
+  }
+  @media (max-width: 900px) {
+    #book-resize-handle { display: none; }
+  }
 
   .panel {
     background: var(--panel-bg);
@@ -158,7 +186,12 @@
      candles are venue history and stay true regardless of the bot.
      The bot list is deliberately exempt: when the selected bot is dead, that
      list is the thing you need to read in order to switch to a live one. */
-  body.stale #side > .panel:not(#bots-panel) {
+  /* #book-pane moved out of #side into its own column (see #layout), but
+     the book is still the bot's own published state and still needs to be
+     greyed out with everything else the bot claims once that bot goes
+     stale — a wide, sharp-looking order book is exactly what would make a
+     fossil read as current here. */
+  body.stale #side > .panel:not(#bots-panel), body.stale #book-pane {
     opacity: 0.45; filter: grayscale(0.7); transition: opacity 0.2s, filter 0.2s;
   }
 
@@ -166,6 +199,25 @@
      zoomed in a couple of steps. A floor that tall forces the grid past the
      viewport and takes the side rail down with it. */
   #chart-wrap { position: relative; flex: 1 1 auto; min-height: 200px; }
+
+  /* Curve/Delta/Volume lives under the main chart now, not buried in the
+     narrow side rail where three mini-charts stacked vertically ate as much
+     height as the chart itself. Full chart-pane width lets the three sit
+     side by side instead, which is both more compact and easier to compare
+     at a glance. Fixed height (flex: 0 0 auto), unlike #chart-wrap, so it
+     takes only what it needs and the chart keeps the rest. */
+  #curve-panel { flex: 0 0 auto; margin-top: var(--gap); }
+  #curve-panel-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  /* Curve and Delta refuse to render on a window pnl_unreliable flags (see
+     renderCurve) — Volume doesn't, since it isn't FIFO-derived, and is left
+     as the only visible block. Without this it would auto-flow into a
+     single 1/3-width track and look broken; spanning the full row makes
+     clear that Volume is deliberately alone here, not a layout glitch. */
+  #curve-panel-grid.only-volume #volume-curve-block { grid-column: 1 / -1; }
+  #curve-panel .mini-chart { height: 260px; }
+  @media (max-width: 700px) {
+    #curve-panel-grid { grid-template-columns: 1fr; }
+  }
   #chart { width: 100%; height: 100%; }
   #chart-label {
     position: absolute; top: 8px; left: 12px; z-index: 5;
@@ -197,6 +249,43 @@
      been this way" apart from "just started moving". */
   .basis-row .val { display: flex; align-items: center; gap: 6px; font-size: 12px; }
   .basis-spark { color: inherit; vertical-align: middle; flex: 0 0 auto; }
+  .basis-row .val small { font-weight: 400; color: var(--text-faint); }
+
+  .session-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  #session-select {
+    flex: 1 1 auto; min-width: 0;
+    background: var(--panel-bg); color: var(--text);
+    border: 1px solid var(--panel-border); border-radius: 4px;
+    font: inherit; font-size: 11px; padding: 2px 4px;
+  }
+  .session-note { font-size: 10px; color: var(--text-faint); white-space: nowrap; }
+
+  /* A markout profile is read left-to-right as time since the fill, so the
+     rows are horizons and the bar diverges from a centre line at zero:
+     right of centre is edge kept, left is edge given back. Colour alone
+     would not survive a glance, the side of the axis does. */
+  .mo-row { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 1px 0; }
+  .mo-row .h { width: 34px; color: var(--text-dim); font-family: var(--title-family); }
+  .mo-track {
+    position: relative; flex: 1 1 auto; height: 9px;
+    background: linear-gradient(var(--divider), var(--divider)) center / 1px 100% no-repeat;
+  }
+  .mo-bar { position: absolute; top: 1px; height: 7px; }
+  .mo-bar.pos { background: var(--bull); left: 50%; }
+  .mo-bar.neg { background: var(--bear); right: 50%; }
+  .mo-val { width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+  .mo-sides { font-size: 9.5px; color: var(--text-faint); width: 86px; text-align: right; }
+  .mo-legend { font-size: 9.5px; color: var(--text-faint); margin-top: 4px; line-height: 1.35; }
+  /* Deliberately quieter than .pnl-blocked: that one refuses a number, this
+     one merely declines to vouch for it. */
+  .pnl-unverified {
+    font-size: 10px; color: var(--text-faint); font-style: italic;
+    margin-top: 3px; line-height: 1.3;
+  }
+  /* A leg too old to price is listed, not hidden: it reads as an absence,
+     which is what it is, instead of leaving a fictional gap on the rows
+     above it. */
+  .basis-stale .label, .basis-stale .val { color: var(--text-faint); font-style: italic; }
 
   /* Recorded by a background thread independent of the browser polling, so
      a halt that happens while nobody is watching still shows up here —
@@ -273,18 +362,34 @@
   .stat-net .val { font-size: 14px; font-weight: 700; }
   .row .val small { color: var(--text-faint); font-size: 10.5px; margin-left: 4px; }
 
-  #book-panel { display: none; }
-  #book-panel.visible { display: block; }
+  /* Order book has its own wide column now (see #layout), not a cramped
+     250px rail slot — bigger rows and more depth actually make use of the
+     space instead of just leaving it blank. */
+  #book-panel { display: none; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+  #book-panel.visible { display: flex; }
+  /* Bid vs ask liquidity over the visible depth — a market-making signal,
+     not just decoration: sustained lean toward one side is the kind of
+     thing you want to notice before it shows up as adverse fills. */
+  .book-imbalance { display: flex; align-items: center; gap: 8px; padding: 2px 6px 8px; }
+  .imb-bar {
+    flex: 1 1 auto; height: 6px; border-radius: 3px; overflow: hidden;
+    background: rgba(250, 82, 82, 0.35); /* ask share shows through where the bid fill doesn't reach */
+  }
+  .imb-fill-bid { height: 100%; background: var(--bull); }
+  .imb-label {
+    font-family: ui-monospace, Menlo, monospace; font-size: 10.5px;
+    color: var(--text-dim); white-space: nowrap; flex: 0 0 auto;
+  }
   .book-header {
     display: flex; justify-content: space-between;
-    font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
-    padding: 0 0 2px 0;
+    font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 0 6px 4px;
   }
-  .book-side { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+  .book-side { font-family: ui-monospace, Menlo, monospace; font-size: 14px; flex: 1 1 auto; overflow-y: auto; min-height: 0; }
   .book-row {
     position: relative;
     display: flex; justify-content: space-between;
-    padding: 0.5px 4px;
+    padding: 3px 6px;
     border-radius: var(--btn-radius);
   }
   .book-row .depth-bar {
@@ -304,27 +409,22 @@
      still where the bot is waiting — so it gets a one-line mention instead
      of silently vanishing past the depth cutoff. */
   .own-off-depth {
-    font-size: 10px; color: var(--accent); font-family: ui-monospace, Menlo, monospace;
-    padding: 1px 4px;
+    font-size: 11px; color: var(--accent); font-family: ui-monospace, Menlo, monospace;
+    padding: 2px 6px;
   }
   .own-off-depth:empty { display: none; }
   .spread-line {
-    text-align: center; font-size: 10.5px; color: var(--text-dim);
-    padding: 3px 0; border-top: 1px solid var(--divider); border-bottom: 1px solid var(--divider);
-    margin: 3px 0 4px 0;
+    text-align: center; font-size: 12px; color: var(--text-dim);
+    padding: 5px 0; border-top: 1px solid var(--divider); border-bottom: 1px solid var(--divider);
+    margin: 4px 0 6px 0;
   }
 
   /* Curve (cumulative realised PnL), Delta (running inventory) and Volume
      (cumulative traded notional) — same replay as the Performance panel,
-     shown as a series instead of a single number. Stacked in one panel:
-     each is support for the figure already printed above it, not a
-     destination of its own, so none needs the weight of a full chart. */
-  .mini-chart-block + .mini-chart-block,
-  /* #volume-curve-block isn't adjacent to the block above it in the DOM (an
-     empty-note sits between them, toggled independently — see the panel
-     markup), so the sibling selector above misses it; give it the same
-     divider explicitly. */
-  #volume-curve-block { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--divider); }
+     shown as a series instead of a single number. Only NAV's single block
+     falls under this now (Curve/Delta/Volume sit side by side in
+     #curve-panel-grid instead, separated by the grid gap, not a divider). */
+  #nav-panel .mini-chart-block + .mini-chart-block { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--divider); }
   .mini-chart-label {
     display: flex; justify-content: space-between; align-items: baseline;
     font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
@@ -362,6 +462,57 @@
       <div id="chart-label"></div>
       <div id="chart"></div>
     </div>
+
+    <div class="panel" id="curve-panel">
+      <h2>Curve, Delta &amp; Volume</h2>
+      <div id="curve-panel-grid">
+        <div class="mini-chart-block">
+          <div class="mini-chart-label">
+            <span>realised pnl (cum.)</span>
+            <span class="mini-chart-vals">
+              <span class="val" id="curve-val">—</span>
+              <span class="val val-sub" id="curve-dd-val">dd —</span>
+            </span>
+          </div>
+          <div class="mini-chart" id="curve-chart"></div>
+        </div>
+        <div class="mini-chart-block">
+          <div class="mini-chart-label"><span>inventory (base)</span><span class="val" id="delta-val">—</span></div>
+          <div class="mini-chart" id="delta-chart"></div>
+        </div>
+        <!-- Volume is a plain running sum of price*size, so unlike the two
+             blocks above it stays honest even on a window curve-empty is
+             hiding for pnl_unreliable — it gets its own block, outside the
+             blocks curve-empty toggles, and its own empty state. -->
+        <div class="mini-chart-block" id="volume-curve-block">
+          <div class="mini-chart-label"><span>volume traded (cum., quote)</span><span class="val" id="volume-curve-val">—</span></div>
+          <div class="mini-chart" id="volume-curve-chart"></div>
+        </div>
+      </div>
+      <div class="empty-note" id="curve-empty">no fills yet</div>
+      <div class="empty-note" id="volume-curve-empty" style="display:none;">no fills yet</div>
+    </div>
+  </div>
+
+  <div id="book-resize-handle" title="Drag to resize the order book"></div>
+
+  <div id="book-pane" class="panel">
+    <h2><span>Order Book <span class="window-note" id="book-age">—</span></span><button id="book-toggle">hide</button></h2>
+    <div id="book-panel" class="visible">
+      <!-- Bid/ask liquidity split over the displayed depth. A number alone
+           ("62% bid") is easy to skim past; the bar is what actually reads
+           at a glance as pressure leaning one way. -->
+      <div class="book-imbalance" id="book-imbalance">
+        <div class="imb-bar"><div class="imb-fill-bid" id="imb-fill-bid"></div></div>
+        <span class="imb-label" id="imb-label">—</span>
+      </div>
+      <div class="book-header"><span>Price</span><span>Size</span></div>
+      <div class="own-off-depth" id="book-asks-off"></div>
+      <div class="book-side" id="book-asks"></div>
+      <div class="spread-line" id="book-spread">—</div>
+      <div class="book-side" id="book-bids"></div>
+      <div class="own-off-depth" id="book-bids-off"></div>
+    </div>
   </div>
 
   <div id="side">
@@ -380,18 +531,6 @@
       <div id="incidents-body"><div class="empty-note">no transitions observed yet</div></div>
     </div>
 
-    <div class="panel">
-      <h2>Order Book <button id="book-toggle">hide</button></h2>
-      <div id="book-panel" class="visible">
-        <div class="book-header"><span>Price</span><span>Size</span></div>
-        <div class="own-off-depth" id="book-asks-off"></div>
-        <div class="book-side" id="book-asks"></div>
-        <div class="spread-line" id="book-spread">—</div>
-        <div class="book-side" id="book-bids"></div>
-        <div class="own-off-depth" id="book-bids-off"></div>
-      </div>
-    </div>
-
     <div class="panel" id="position-panel">
       <h2>Position &amp; Margin</h2>
       <div id="position-body"><div class="row"><span class="label">loading…</span></div></div>
@@ -399,39 +538,32 @@
 
     <div class="panel" id="stats-panel">
       <h2>Performance <span class="window-note" id="stats-window">—</span></h2>
+      <!-- Which run these figures cover. A performance figure with no
+           stated window is not a measurement, and "the last 2000 fills"
+           was a window that moved under the reader's feet and spliced
+           several runs together. -->
+      <div class="session-bar">
+        <select id="session-select" title="which run to measure"></select>
+        <span class="session-note" id="session-note"></span>
+      </div>
       <div id="stats-body"><div class="empty-note">no fills yet</div></div>
     </div>
 
-    <div class="panel" id="curve-panel">
-      <h2>Curve, Delta &amp; Volume</h2>
-      <div class="mini-chart-block">
-        <div class="mini-chart-label">
-          <span>realised pnl (cum.)</span>
-          <span class="mini-chart-vals">
-            <span class="val" id="curve-val">—</span>
-            <span class="val val-sub" id="curve-dd-val">dd —</span>
-          </span>
-        </div>
-        <div class="mini-chart" id="curve-chart"></div>
-      </div>
-      <div class="mini-chart-block">
-        <div class="mini-chart-label"><span>inventory (base)</span><span class="val" id="delta-val">—</span></div>
-        <div class="mini-chart" id="delta-chart"></div>
-      </div>
-      <div class="empty-note" id="curve-empty">no fills yet</div>
-      <!-- Volume is a plain running sum of price*size, so unlike the two
-           blocks above it stays honest even on a window curve-empty is
-           hiding for pnl_unreliable — it gets its own block, outside the
-           blocks curve-empty toggles, and its own empty state. -->
-      <div class="mini-chart-block" id="volume-curve-block">
-        <div class="mini-chart-label"><span>volume traded (cum., quote)</span><span class="val" id="volume-curve-val">—</span></div>
-        <div class="mini-chart" id="volume-curve-chart"></div>
-      </div>
-      <div class="empty-note" id="volume-curve-empty" style="display:none;">no fills yet</div>
+    <!-- Reads directly under Performance on purpose: that panel answers
+         "how much did I make", this one answers "does it survive" — the
+         spread captured at the moment of the fill means nothing if the mid
+         walks away in the 30s that follow. -->
+    <div class="panel" id="markout-panel">
+      <h2>Markout <span class="window-note" id="markout-note">—</span></h2>
+      <div id="markout-body"><div class="empty-note">no markout data</div></div>
     </div>
 
     <div class="panel" id="nav-panel">
-      <h2>NAV</h2>
+      <!-- Sampled while a browser polls, never replayed from a ledger: this
+           series exists only for as long as someone has been watching, and
+           the header says how much of it there is rather than letting the
+           axis imply a session. -->
+      <h2>NAV <span class="window-note" id="nav-window">—</span></h2>
       <div class="mini-chart-block">
         <div class="mini-chart-label"><span>account equity</span><span class="val" id="nav-val">—</span></div>
         <div class="mini-chart" id="nav-chart"></div>
