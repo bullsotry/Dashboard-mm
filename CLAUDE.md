@@ -43,11 +43,13 @@ margin/NAV panel instead of erroring — every adapter method returns `None`
 on failure/missing-creds rather than raising, and callers already handle
 that.
 
-`Account.equity` (NAV) has three different provenances by venue — OKX
-reports it directly (`eq`), Bitunix/Coinbase derive it as
-`available + margin_used + unrealised_pnl`. If you touch one of these,
-check whether the other two need the same fix; a NAV panel that means
-something different per venue is worse than no NAV panel.
+`Account.equity` (NAV) has a different formula on every venue, not just a
+different provenance — OKX reports it directly (`eq`), Bitunix derives
+`available + frozen + margin_used + upnl + bonus` (futures account),
+Coinbase derives `available + held` (spot only, no margin/unrealised
+terms exist there). If you touch one of these, check whether the others
+need the same fix; a NAV panel that means something different per venue is
+worse than no NAV panel.
 
 ## Before calling anything done
 

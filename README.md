@@ -68,7 +68,7 @@ adapters/
   coinbase_klines.py      Coinbase Advanced Trade REST, public (candles)
   okx_account.py          OKX v5 REST, signed, GET-only; forces IPv4 (OKX's IP allow-list rejects IPv6)
   okx_klines.py           OKX v5 REST, public (resolves the rolling instId, then candles)
-static/                   index.html + app.js + fill_markers.js + charting vendor
+static/                   index.html + app.js + fill_markers.js + price_tags.js + charting vendor
 tests/                    hand-computed cases for the PnL engine + basis pairing + adapters
 deploy/                   systemd unit
 ```
@@ -290,13 +290,16 @@ the account adapter rather than the fill replay.
   Curve/Delta have refused, e.g. right after a restart before the ledger has
   caught up with the exchange.
 - **NAV** (account equity) is different in kind: it's not derived from fills
-  at all, it's `available + frozen + margin_used + unrealised_pnl` off each
-  venue's own account adapter. `frozen` — capital locked by *resting orders*
-  — is in that sum because leaving it out is not a rounding error: on
-  Bitunix it held 92.43 USDT against an `available` of 1.73, so the panel
-  reported a 14.42 NAV on a 106.95 account and made it lurch every time the
-  bot placed or pulled a quote. An equity that omits order-locked capital
-  measures quoting activity, not net assets.
+  at all, it's read off each venue's own account adapter, and the formula is
+  not the same one twice — OKX reports it directly (`eq`), Bitunix derives
+  `available + frozen + margin_used + upnl + bonus`, Coinbase derives
+  `available + held` (spot only, no margin/unrealised terms to add).
+  `frozen` — capital locked by *resting orders* — is in Bitunix's sum
+  because leaving it out is not a rounding error: it once held 92.43 USDT
+  against an `available` of 1.73, so the panel reported a 14.42 NAV on a
+  106.95 account and made it lurch every time the bot placed or pulled a
+  quote. An equity that omits order-locked capital measures quoting
+  activity, not net assets.
 
   **The scope is not the same on every venue**, so it is printed next to the
   figure rather than assumed: Bitunix is the futures account, Coinbase is a
