@@ -1284,6 +1284,96 @@ window.addEventListener("resize", () => {
   if (!Number.isNaN(current)) setBookWidth(current, false);
 });
 
+// --- Side rail width resize ---
+// Second handle, same mechanism as the book's, between the book and the
+// rail. #layout now has 5 columns (chart, handle, book, handle, rail), so
+// each handle's clamp has to reserve the *other* variable-width column too
+// — the book's max depends on how wide the rail currently is, and vice
+// versa, not on a hardcoded 260px.
+const railResizeHandle = document.getElementById("rail-resize-handle");
+const RAIL_WIDTH_KEY = "dashboard.railWidthPx";
+const RAIL_WIDTH_MIN = 200;
+
+function currentBookWidthPx() {
+  const v = parseFloat(getComputedStyle(layoutEl).getPropertyValue("--book-w"));
+  return Number.isNaN(v) ? 400 : v;
+}
+function currentRailWidthPx() {
+  const v = parseFloat(getComputedStyle(layoutEl).getPropertyValue("--rail-w"));
+  return Number.isNaN(v) ? 260 : v;
+}
+// Layout padding (2×) + chart min-width + the two 10px handle columns +
+// the 4 gaps between the 5 columns — everything that isn't the book or
+// the rail themselves.
+const FIXED_LAYOUT_OVERHEAD = 20 + 300 + 20 + 40;
+
+function clampBookWidth(px) {
+  const maxPx = Math.max(BOOK_WIDTH_MIN, layoutEl.clientWidth - FIXED_LAYOUT_OVERHEAD - currentRailWidthPx());
+  return Math.min(Math.max(px, BOOK_WIDTH_MIN), maxPx);
+}
+function clampRailWidth(px) {
+  const maxPx = Math.max(RAIL_WIDTH_MIN, layoutEl.clientWidth - FIXED_LAYOUT_OVERHEAD - currentBookWidthPx());
+  return Math.min(Math.max(px, RAIL_WIDTH_MIN), maxPx);
+}
+function setRailWidth(px, persist) {
+  const clamped = clampRailWidth(px);
+  layoutEl.style.setProperty("--rail-w", `${clamped}px`);
+  if (persist) localStorage.setItem(RAIL_WIDTH_KEY, String(clamped));
+}
+
+const savedRailWidth = parseFloat(localStorage.getItem(RAIL_WIDTH_KEY));
+if (!Number.isNaN(savedRailWidth)) setRailWidth(savedRailWidth, false);
+
+let resizingRail = false;
+railResizeHandle.addEventListener("pointerdown", (e) => {
+  resizingRail = true;
+  railResizeHandle.classList.add("dragging");
+  railResizeHandle.setPointerCapture(e.pointerId);
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+  e.preventDefault();
+});
+railResizeHandle.addEventListener("pointermove", (e) => {
+  if (!resizingRail) return;
+  // Rail width = distance from the cursor to #layout's fixed right inner
+  // edge, mirroring the book handle's left-edge measurement.
+  const layoutRect = layoutEl.getBoundingClientRect();
+  const padRight = parseFloat(getComputedStyle(layoutEl).paddingRight) || 0;
+  setRailWidth(layoutRect.right - padRight - e.clientX - 10 /* gap between handle and rail */, false);
+});
+function endRailResize(e) {
+  if (!resizingRail) return;
+  resizingRail = false;
+  railResizeHandle.classList.remove("dragging");
+  if (e && railResizeHandle.hasPointerCapture(e.pointerId)) railResizeHandle.releasePointerCapture(e.pointerId);
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
+  const current = getComputedStyle(layoutEl).getPropertyValue("--rail-w");
+  if (current) localStorage.setItem(RAIL_WIDTH_KEY, current.trim());
+}
+railResizeHandle.addEventListener("pointerup", endRailResize);
+railResizeHandle.addEventListener("pointercancel", endRailResize);
+window.addEventListener("resize", () => {
+  const current = parseFloat(getComputedStyle(layoutEl).getPropertyValue("--rail-w"));
+  if (!Number.isNaN(current)) setRailWidth(current, false);
+});
+
+// --- Per-panel height resize persistence ---
+// The height itself is native CSS `resize: vertical` (see .resizable in
+// index.html) — the browser already gives every element with that class a
+// drag corner, no pointer-capture code needed. This just remembers what the
+// user dragged it to, the same "deliberate layout choice survives a
+// reload" contract as the two column handles above.
+const RESIZE_KEY_PREFIX = "dashboard.resizeH.";
+document.querySelectorAll(".resizable[id]").forEach((el) => {
+  const key = RESIZE_KEY_PREFIX + el.id;
+  const stored = localStorage.getItem(key);
+  if (stored) el.style.height = stored;
+  new ResizeObserver((entries) => {
+    localStorage.setItem(key, `${Math.round(entries[0].contentRect.height)}px`);
+  }).observe(el);
+});
+
 // --- Freshness tracking ---
 let lastGoodPollTs = 0; // local clock, for link health
 // Bot age is measured server-side (server_ts - source_ts) and then extended

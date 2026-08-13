@@ -66,7 +66,7 @@
        chart column is 1fr, dragging the handle changes the book's width
        without moving the side rail's left edge — that's what makes the
        book resizable while keeping the rail a stable drop target. */
-    grid-template-columns: minmax(300px, 1fr) 10px minmax(200px, var(--book-w, 400px)) 260px;
+    grid-template-columns: minmax(300px, 1fr) 10px minmax(200px, var(--book-w, 400px)) 10px minmax(200px, var(--rail-w, 260px));
     gap: var(--gap);
     padding: var(--gap);
     flex: 1 1 auto;
@@ -93,9 +93,38 @@
   #book-resize-handle:hover::before, #book-resize-handle.dragging::before {
     background: var(--accent); width: 3px;
   }
-  @media (max-width: 900px) {
-    #book-resize-handle { display: none; }
+  /* Second handle, same mechanism, between the book and the rail — widens
+     or narrows the whole side rail instead of the book. */
+  #rail-resize-handle {
+    cursor: col-resize; position: relative; min-width: 0;
+    touch-action: none;
   }
+  #rail-resize-handle::before {
+    content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 2px;
+    transform: translateX(-50%); background: var(--panel-border);
+    transition: background 0.1s;
+  }
+  #rail-resize-handle:hover::before, #rail-resize-handle.dragging::before {
+    background: var(--accent); width: 3px;
+  }
+  @media (max-width: 900px) {
+    #book-resize-handle, #rail-resize-handle { display: none; }
+  }
+
+  /* Per-panel height resize: native CSS `resize`, not a custom JS drag
+     handle — these are simple list/chart containers stacked vertically in
+     a rail that already scrolls itself, so the browser's own bottom-right
+     grab corner is enough and needs no bespoke pointer-capture logic like
+     the column handles above (those move a shared boundary between two
+     neighbours; a body resize only ever affects itself). */
+  .resizable {
+    resize: vertical; overflow-y: auto; overflow-x: hidden;
+    min-height: 40px;
+  }
+  /* Charts resize themselves via the ResizeObserver already wired in
+     makeMiniChart (see app.js) — `overflow: hidden` instead of `auto`
+     since a mini-chart never needs its own scrollbar. */
+  .mini-chart.resizable { overflow: hidden; }
 
   .panel {
     background: var(--panel-bg);
@@ -297,7 +326,7 @@
   /* Recorded by a background thread independent of the browser polling, so
      a halt that happens while nobody is watching still shows up here —
      the whole reason this exists instead of just the live/warn/dead dot. */
-  #incidents-body { max-height: 160px; overflow-y: auto; }
+  #incidents-body { height: 160px; }
   .incident-row { font-size: 10.5px; padding: 2px 0; }
   .incident-row .label { font-family: ui-monospace, Menlo, monospace; }
   .incident-row .val { font-weight: 600; }
@@ -481,11 +510,11 @@
               <span class="val val-sub" id="curve-dd-val">dd —</span>
             </span>
           </div>
-          <div class="mini-chart" id="curve-chart"></div>
+          <div class="mini-chart resizable" id="curve-chart"></div>
         </div>
         <div class="mini-chart-block">
           <div class="mini-chart-label"><span>inventory (base)</span><span class="val" id="delta-val">—</span></div>
-          <div class="mini-chart" id="delta-chart"></div>
+          <div class="mini-chart resizable" id="delta-chart"></div>
         </div>
         <!-- Volume is a plain running sum of price*size, so unlike the two
              blocks above it stays honest even on a window curve-empty is
@@ -493,7 +522,7 @@
              blocks curve-empty toggles, and its own empty state. -->
         <div class="mini-chart-block" id="volume-curve-block">
           <div class="mini-chart-label"><span>volume traded (cum., quote)</span><span class="val" id="volume-curve-val">—</span></div>
-          <div class="mini-chart" id="volume-curve-chart"></div>
+          <div class="mini-chart resizable" id="volume-curve-chart"></div>
         </div>
       </div>
       <div class="empty-note" id="curve-empty">no fills yet</div>
@@ -522,25 +551,27 @@
     </div>
   </div>
 
+  <div id="rail-resize-handle" title="Drag to resize the side rail"></div>
+
   <div id="side">
     <div class="panel" id="bots-panel">
       <h2><span>Bots <span class="window-note" id="bots-count">—</span></span><button class="panel-toggle" data-panel="bots-panel">hide</button></h2>
-      <div id="bots-body"><div class="empty-note">scanning…</div></div>
+      <div id="bots-body" class="resizable"><div class="empty-note">scanning…</div></div>
     </div>
 
     <div class="panel" id="basis-panel">
       <h2><span>Basis</span><button class="panel-toggle" data-panel="basis-panel">hide</button></h2>
-      <div id="basis-body"><div class="empty-note">need 2 legs on different venues</div></div>
+      <div id="basis-body" class="resizable"><div class="empty-note">need 2 legs on different venues</div></div>
     </div>
 
     <div class="panel" id="incidents-panel">
       <h2><span>Incidents</span><button class="panel-toggle" data-panel="incidents-panel">hide</button></h2>
-      <div id="incidents-body"><div class="empty-note">no transitions observed yet</div></div>
+      <div id="incidents-body" class="resizable"><div class="empty-note">no transitions observed yet</div></div>
     </div>
 
     <div class="panel" id="position-panel">
       <h2><span>Position &amp; Margin</span><button class="panel-toggle" data-panel="position-panel">hide</button></h2>
-      <div id="position-body"><div class="row"><span class="label">loading…</span></div></div>
+      <div id="position-body" class="resizable"><div class="row"><span class="label">loading…</span></div></div>
     </div>
 
     <div class="panel" id="stats-panel">
@@ -553,7 +584,7 @@
         <select id="session-select" title="which run to measure"></select>
         <span class="session-note" id="session-note"></span>
       </div>
-      <div id="stats-body"><div class="empty-note">no fills yet</div></div>
+      <div id="stats-body" class="resizable"><div class="empty-note">no fills yet</div></div>
     </div>
 
     <!-- Reads directly under Performance on purpose: that panel answers
@@ -562,7 +593,7 @@
          walks away in the 30s that follow. -->
     <div class="panel" id="markout-panel">
       <h2><span>Markout <span class="window-note" id="markout-note">—</span></span><button class="panel-toggle" data-panel="markout-panel">hide</button></h2>
-      <div id="markout-body"><div class="empty-note">no markout data</div></div>
+      <div id="markout-body" class="resizable"><div class="empty-note">no markout data</div></div>
     </div>
 
     <div class="panel" id="nav-panel">
@@ -573,7 +604,7 @@
       <h2><span>NAV <span class="window-note" id="nav-window">—</span></span><button class="panel-toggle" data-panel="nav-panel">hide</button></h2>
       <div class="mini-chart-block">
         <div class="mini-chart-label"><span>account equity</span><span class="val" id="nav-val">—</span></div>
-        <div class="mini-chart" id="nav-chart"></div>
+        <div class="mini-chart resizable" id="nav-chart"></div>
       </div>
       <div class="empty-note" id="nav-empty">account margin unavailable</div>
     </div>
