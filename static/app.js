@@ -1354,70 +1354,142 @@ window.addEventListener("resize", () => {
   if (!Number.isNaN(current)) setRailWidth(current, false);
 });
 
-// --- Per-panel zoom (drag the grip) ---
-// Drag a panel's bottom grip down to make its contents bigger, up to make
-// them smaller, double-click to reset. Every text size inside a panel is
-// written as `calc(<base>px * var(--pz))` (see index.html), so setting
-// --pz on the panel scales all of its type at once — and since panels are
-// height:auto, the panel grows to fit. That is why there is no separate
-// height control: enlarging a panel *is* enlarging what it shows.
+// --- Per-panel size (drag the grip) ---
+// Drag a panel's bottom grip to resize the panel box: the drag sets an
+// explicit pixel height on that panel's body, 1:1 with the mouse, and
+// because a panel is height:auto the panel itself shrinks or grows with
+// it. Content that stops fitting scrolls inside the body. Double-click
+// resets to the natural size.
 //
-// The grip elements are built here rather than repeated nine times in the
-// markup, so a new panel becomes zoomable by existing, not by remembering
-// to paste a div.
-const ZOOM_KEY_PREFIX = "dashboard.zoom.";
-const ZOOM_MIN = 0.75;
-const ZOOM_MAX = 2.5;
-// Pixels of drag per 1.0 of zoom. Low enough that the panel visibly
-// responds within the first few pixels of the gesture, high enough that
-// the full range needs a deliberate pull rather than a twitch.
-const ZOOM_PX_PER_UNIT = 220;
-// The main chart pane is excluded: its candles are a canvas that scales
-// with the pane, not type, so a text zoom there would move only the
-// overlay label. #curve-panel, nested inside it, is included on its own.
-const ZOOM_EXCLUDE = new Set(["chart-pane"]);
+// The type follows only faintly. An earlier cut scaled the text and let
+// the box follow, which is backwards: shrinking a panel is how you buy
+// screen space for the panel you *are* watching, and it is worthless if
+// the one you shrank becomes unreadable. So the box moves freely while
+// --pz stays in a narrow band around 1.
+const SIZE_KEY_PREFIX = "dashboard.panelSize.";
+// Fraction of the box's proportional change that reaches the type: halve
+// the box and the text loses ~12%, double it and the text gains ~25%.
+const TEXT_RESPONSE = 0.25;
+const PZ_MIN = 0.9;
+const PZ_MAX = 1.6;
+const MIN_BODY_H = 26;
+// The main chart pane is excluded: it already sizes itself against the
+// viewport and its candles are a canvas, not type. #curve-panel, nested
+// inside it, is included on its own.
+const SIZE_EXCLUDE = new Set(["chart-pane"]);
 
-const clampZoom = (z) => Math.min(Math.max(z, ZOOM_MIN), ZOOM_MAX);
+// Which element inside each panel actually carries the height. Written out
+// rather than inferred ("last child", "biggest child"): the panels differ
+// enough — NAV's body is its chart, Curve's is three charts side by side,
+// the book's is the whole bid/ask stack — that a clever rule would be a
+// guess that breaks the day a panel gains a footer.
+const PANEL_BODIES = {
+  "bots-panel": ["bots-body"],
+  "basis-panel": ["basis-body"],
+  "incidents-panel": ["incidents-body"],
+  "position-panel": ["position-body"],
+  "stats-panel": ["stats-body"],
+  "markout-panel": ["markout-body"],
+  "nav-panel": ["nav-chart"],
+  "curve-panel": ["curve-chart", "delta-chart", "volume-curve-chart"],
+  "book-pane": ["book-panel"],
+};
+
+const clampPz = (z) => Math.min(Math.max(z, PZ_MIN), PZ_MAX);
 
 document.querySelectorAll(".panel[id]").forEach((panel) => {
-  if (ZOOM_EXCLUDE.has(panel.id)) return;
+  if (SIZE_EXCLUDE.has(panel.id)) return;
+  const bodies = (PANEL_BODIES[panel.id] || [])
+    .map((id) => document.getElementById(id))
+    .filter(Boolean);
+  if (bodies.length === 0) return;
 
   const grip = document.createElement("div");
   grip.className = "panel-grip";
-  grip.title = "Drag down to enlarge, up to shrink — double-click to reset";
+  grip.title = "Drag to resize this panel — double-click to reset";
   const readout = document.createElement("span");
   readout.className = "grip-readout";
   grip.appendChild(readout);
   panel.appendChild(grip);
 
-  const key = ZOOM_KEY_PREFIX + panel.id;
-  const saved = parseFloat(localStorage.getItem(key));
-  let pz = Number.isNaN(saved) ? 1 : clampZoom(saved);
-  const apply = () => panel.style.setProperty("--pz", String(pz));
-  apply();
+  // A canvas body must not grow a scrollbar; a list body must.
+  const isChart = (el) => el.classList.contains("mini-chart");
+  bodies.forEach((el) => {
+    if (!isChart(el)) el.style.overflowY = "auto";
+  });
+
+  // Height with nothing imposed, measured on the element that leads the
+  // group. Read once per gesture rather than continuously: --pz changes
+  // the natural height, so measuring mid-drag would feed the drag back
+  // into itself and make the panel run away from the cursor.
+  function naturalHeight() {
+    const el = bodies[0];
+    const prevH = el.style.height;
+    const prevMax = el.style.maxHeight;
+    el.style.height = "auto";
+    el.style.maxHeight = "none";
+    const h = el.getBoundingClientRect().height;
+    el.style.height = prevH;
+    el.style.maxHeight = prevMax;
+    return Math.max(h, MIN_BODY_H);
+  }
+
+  function applySize(h, natural) {
+    bodies.forEach((el) => {
+      el.style.height = `${h}px`;
+      // #incidents-body ships a max-height; an explicit height must win
+      // over it or the panel would refuse to grow past that cap.
+      el.style.maxHeight = "none";
+    });
+    panel.style.setProperty("--pz", String(clampPz(1 + (h / natural - 1) * TEXT_RESPONSE)));
+  }
+
+  function resetSize() {
+    bodies.forEach((el) => {
+      el.style.height = "";
+      el.style.maxHeight = "";
+    });
+    panel.style.removeProperty("--pz");
+    localStorage.removeItem(SIZE_KEY_PREFIX + panel.id);
+  }
+
+  const key = SIZE_KEY_PREFIX + panel.id;
+  const saved = JSON.parse(localStorage.getItem(key) || "null");
+  if (saved && saved.h > 0) {
+    // --pz is restored from storage, not recomputed: at load the panel
+    // still says "scanning…", so its natural height is nothing like what
+    // it will be once data arrives, and a recomputed ratio would spike.
+    bodies.forEach((el) => {
+      el.style.height = `${saved.h}px`;
+      el.style.maxHeight = "none";
+    });
+    panel.style.setProperty("--pz", String(clampPz(saved.pz || 1)));
+  }
 
   let dragging = false;
   let startY = 0;
-  let startPz = 1;
+  let startH = 0;
+  let natural = 0;
 
   grip.addEventListener("pointerdown", (e) => {
     dragging = true;
     startY = e.clientY;
-    startPz = pz;
+    startH = bodies[0].getBoundingClientRect().height;
+    natural = naturalHeight();
     grip.classList.add("dragging");
     grip.setPointerCapture(e.pointerId);
     document.body.style.cursor = "ns-resize";
     document.body.style.userSelect = "none";
-    readout.textContent = `${Math.round(pz * 100)}%`;
+    readout.textContent = `${Math.round(startH)}px`;
     e.preventDefault();
   });
   grip.addEventListener("pointermove", (e) => {
     if (!dragging) return;
-    pz = clampZoom(startPz + (e.clientY - startY) / ZOOM_PX_PER_UNIT);
-    apply();
-    readout.textContent = `${Math.round(pz * 100)}%`;
+    const h = Math.max(MIN_BODY_H, startH + (e.clientY - startY));
+    applySize(h, natural);
+    readout.textContent = `${Math.round(h)}px`;
   });
-  function endZoomDrag(e) {
+  function endSizeDrag(e) {
     if (!dragging) return;
     dragging = false;
     grip.classList.remove("dragging");
@@ -1425,15 +1497,14 @@ document.querySelectorAll(".panel[id]").forEach((panel) => {
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
     readout.textContent = "";
-    localStorage.setItem(key, pz.toFixed(3));
+    localStorage.setItem(key, JSON.stringify({
+      h: Math.round(bodies[0].getBoundingClientRect().height),
+      pz: parseFloat(panel.style.getPropertyValue("--pz")) || 1,
+    }));
   }
-  grip.addEventListener("pointerup", endZoomDrag);
-  grip.addEventListener("pointercancel", endZoomDrag);
-  grip.addEventListener("dblclick", () => {
-    pz = 1;
-    apply();
-    localStorage.setItem(key, "1");
-  });
+  grip.addEventListener("pointerup", endSizeDrag);
+  grip.addEventListener("pointercancel", endSizeDrag);
+  grip.addEventListener("dblclick", resetSize);
 });
 
 // --- Freshness tracking ---

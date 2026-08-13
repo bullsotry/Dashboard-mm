@@ -111,19 +111,26 @@
     #book-resize-handle, #rail-resize-handle { display: none; }
   }
 
-  /* ── Per-panel zoom ───────────────────────────────────────────────────
-     Every text size inside a panel is `calc(<base>px * var(--pz))`, and
-     the −/+ buttons in the panel's title bar set `--pz` on that panel.
-     The panel has `height: auto`, so bigger text makes the panel itself
-     grow — which is the point: a figure you want to read from across the
-     room needs the room to read it in.
+  /* ── Per-panel size ───────────────────────────────────────────────────
+     Dragging a panel's grip resizes the panel *box*: app.js sets an
+     explicit pixel height on that panel's body, 1:1 with the mouse, and
+     since a panel is height:auto the whole panel shrinks or grows with it.
+     Content that no longer fits scrolls inside the body.
+
+     The type follows, but only faintly — `--pz` moves by a fraction of the
+     box's change (see TEXT_RESPONSE in app.js). Making a panel small must
+     not make it unreadable: the point of shrinking a panel you are not
+     watching is to buy space for one you are, and 8px rows serve nobody.
+     So every text size is `calc(<base>px * var(--pz))` with --pz kept in a
+     narrow band around 1, while the box itself is free to move a lot.
 
      Deliberately NOT CSS `zoom` or `transform: scale()`, which would have
      been one line: the mini-charts and the order book draw into a canvas
      (lightweight-charts, plus price_tags.js's own custom primitive doing
      hit-testing in pixel coordinates). Scaling their container blurs the
-     canvas and desynchronises those coordinates from the pointer. Scaling
-     only the type leaves every canvas rendering at its true resolution. */
+     canvas and desynchronises those coordinates from the pointer. Sizing
+     the box and leaving the canvas to re-render at its true resolution
+     (its ResizeObserver already does) keeps both sharp. */
   .panel { --pz: 1; }
   .panel-ctl { display: flex; align-items: center; gap: 3px; }
 
@@ -284,7 +291,7 @@
      single 1/3-width track and look broken; spanning the full row makes
      clear that Volume is deliberately alone here, not a layout glitch. */
   #curve-panel-grid.only-volume #volume-curve-block { grid-column: 1 / -1; }
-  #curve-panel .mini-chart { height: calc(260px * var(--pz)); }
+  #curve-panel .mini-chart { height: 260px; }
   @media (max-width: 700px) {
     #curve-panel-grid { grid-template-columns: 1fr; }
   }
@@ -506,7 +513,7 @@
      dimmed and smaller so it reads as context, not a second headline. */
   .mini-chart-vals { display: flex; align-items: baseline; gap: 6px; }
   .mini-chart-vals .val-sub { font-size: calc(9.5px * var(--pz)); color: var(--text-faint); }
-  .mini-chart { height: calc(60px * var(--pz)); }
+  .mini-chart { height: 60px; }
 
   /* Below ~900px the fixed 300px rail leaves the chart unusably narrow, so
      the panels stack under it instead of beside it. */

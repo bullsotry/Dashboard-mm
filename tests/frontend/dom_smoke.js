@@ -99,11 +99,23 @@ check("main chart pane has no grip",
       !doc.getElementById("chart-pane").querySelector(":scope > .panel-grip"));
 
 // Drive a real drag on the Performance panel.
+// jsdom does no layout: every element measures 0x0, so getBoundingClientRect
+// is stubbed to report whatever inline height the code set. That is exactly
+// the quantity under test — the drag's arithmetic and what it writes back —
+// and none of these assertions are about real layout.
 const panel = doc.getElementById("stats-panel");
+const body = doc.getElementById("stats-body");
 const grip = panel.querySelector(":scope > .panel-grip");
-const pzOf = (el) => parseFloat(el.style.getPropertyValue("--pz"));
+const NATURAL = 120;
+window.Element.prototype.getBoundingClientRect = function () {
+  const h = this.style.height && this.style.height !== "auto"
+    ? parseFloat(this.style.height)
+    : NATURAL;
+  return { height: h, width: 200, top: 0, left: 0, right: 200, bottom: h, x: 0, y: 0 };
+};
 
-check("starts at 100%", pzOf(panel) === 1, `--pz=${pzOf(panel)}`);
+const pzOf = (el) => parseFloat(el.style.getPropertyValue("--pz") || "1");
+const heightOf = (el) => parseFloat(el.style.height || "0");
 
 const drag = (dy) => {
   const opts = (y) => ({ clientY: y, bubbles: true, cancelable: true });
@@ -112,21 +124,54 @@ const drag = (dy) => {
   grip.dispatchEvent(new window.MouseEvent("pointerup", opts(500 + dy)));
 };
 
-drag(110); // half of ZOOM_PX_PER_UNIT => +0.5
-check("dragging DOWN enlarges", pzOf(panel) > 1.4 && pzOf(panel) < 1.6, `--pz=${pzOf(panel)}`);
-check("the drag persisted", window.localStorage.getItem("dashboard.zoom.stats-panel") !== null,
-      `stored=${window.localStorage.getItem("dashboard.zoom.stats-panel")}`);
+// The whole point of the redesign: the BOX must move with the mouse,
+// roughly 1:1, while the type barely budges.
+drag(100);
+check("dragging down grows the box ~1:1 with the mouse",
+      Math.abs(heightOf(body) - (NATURAL + 100)) < 2,
+      `height=${heightOf(body)}px, expected ~${NATURAL + 100}px`);
+check("...and the text follows only faintly",
+      pzOf(panel) > 1.0 && pzOf(panel) < 1.3,
+      `--pz=${pzOf(panel).toFixed(3)} for a ${((NATURAL + 100) / NATURAL).toFixed(2)}x box`);
+check("the box moved much more than the type",
+      ((NATURAL + 100) / NATURAL) / pzOf(panel) > 1.5,
+      `box x${((NATURAL + 100) / NATURAL).toFixed(2)} vs type x${pzOf(panel).toFixed(2)}`);
+check("the drag persisted", window.localStorage.getItem("dashboard.panelSize.stats-panel") !== null,
+      `stored=${window.localStorage.getItem("dashboard.panelSize.stats-panel")}`);
 
-drag(-330);
-check("dragging UP shrinks below 1", pzOf(panel) < 1, `--pz=${pzOf(panel)}`);
-check("clamped at the floor", pzOf(panel) >= 0.75, `--pz=${pzOf(panel)}`);
+// Shrinking: the box must be free to get genuinely small, the text must not
+// follow it down into illegibility.
+drag(-200);
+check("dragging up shrinks the box a lot", heightOf(body) < NATURAL * 0.6,
+      `height=${heightOf(body)}px from a natural ${NATURAL}px`);
+check("...but the text stays readable", pzOf(panel) >= 0.9,
+      `--pz=${pzOf(panel).toFixed(3)}`);
+
+check("the box cannot be dragged below the floor", heightOf(body) >= 26,
+      `height=${heightOf(body)}px`);
 
 grip.dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true }));
-check("double-click resets to 100%", pzOf(panel) === 1, `--pz=${pzOf(panel)}`);
+check("double-click clears the imposed height", body.style.height === "",
+      `height='${body.style.height}'`);
+check("double-click clears the type scale", panel.style.getPropertyValue("--pz") === "");
+check("double-click forgets the saved size",
+      window.localStorage.getItem("dashboard.panelSize.stats-panel") === null);
 
 // Panels are independent.
 const other = doc.getElementById("bots-panel");
-check("zooming one panel leaves the others alone", pzOf(other) === 1, `--pz=${pzOf(other)}`);
+check("resizing one panel leaves the others alone",
+      doc.getElementById("bots-body").style.height === "" && pzOf(other) === 1);
+
+// Curve panel drives three charts from one grip.
+const curveGrip = doc.getElementById("curve-panel").querySelector(":scope > .panel-grip");
+curveGrip.dispatchEvent(new window.MouseEvent("pointerdown", { clientY: 400, bubbles: true, cancelable: true }));
+curveGrip.dispatchEvent(new window.MouseEvent("pointermove", { clientY: 460, bubbles: true, cancelable: true }));
+curveGrip.dispatchEvent(new window.MouseEvent("pointerup", { clientY: 460, bubbles: true, cancelable: true }));
+check("one grip resizes all three Curve/Delta/Volume charts together",
+      ["curve-chart", "delta-chart", "volume-curve-chart"]
+        .every((id) => heightOf(doc.getElementById(id)) === NATURAL + 60),
+      ["curve-chart", "delta-chart", "volume-curve-chart"]
+        .map((id) => `${id}=${heightOf(doc.getElementById(id))}`).join(" "));
 
 // The two column handles must still be wired (they live above the zoom code).
 const layout = doc.getElementById("layout");
