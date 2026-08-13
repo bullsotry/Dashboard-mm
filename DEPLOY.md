@@ -56,14 +56,17 @@ tar czf - \
   server.py config.py requirements.txt \
   adapters/__init__.py adapters/base.py adapters/stats.py \
   adapters/discovery.py adapters/bot_files.py adapters/basis.py \
+  adapters/markouts.py adapters/sessions.py \
   adapters/bitunix_account.py adapters/bitunix_klines.py \
   adapters/coinbase_account.py adapters/coinbase_klines.py \
   adapters/okx_account.py adapters/okx_klines.py \
-  static/index.html static/app.js static/fill_markers.js \
+  static/index.html static/app.js static/fill_markers.js static/price_tags.js \
   static/vendor/lightweight-charts.standalone.production.js \
   tests/test_stats.py tests/test_basis.py tests/test_bot_files.py \
   tests/test_discovery.py tests/test_okx_klines.py tests/test_coinbase_klines.py \
   tests/test_okx_account.py tests/test_coinbase_account.py \
+  tests/test_bitunix_account.py tests/test_bitunix_klines.py \
+  tests/test_markouts.py tests/test_sessions.py \
   deploy/dashboard-mm.service \
 | ssh "$VPS" 'tar xzf - -C /root/dashboard-mm'
 ```
