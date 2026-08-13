@@ -65,6 +65,24 @@ anything that touches money-shaped numbers (PnL, NAV, volume), that's the
 minimum bar, not the whole bar: if you can, also run the server locally
 against a real or fixture bot and look at the actual panel.
 
+**Touching `static/app.js` needs more than `node -c`.** A page that throws
+partway through that file still renders and still polls — it just silently
+stops wiring up every control below the throw, which reads as "the button
+does nothing" rather than as an error. That shipped twice. `node -c` cannot
+see it: the code is syntactically valid. Run the DOM smoke test, including
+the seeded variant, because the last such bug only fired for users who had
+already dragged the order-book divider:
+
+```bash
+npm install jsdom                                  # once
+node tests/frontend/dom_smoke.js
+SEED_BOOK=420 node tests/frontend/dom_smoke.js     # with saved layout state
+```
+
+`tests/test_app_js_declarations.py` guards the specific shape that caused
+it (a function declared twice at top level, hoisting over a `const` still
+in its temporal dead zone) and does run in the pytest suite.
+
 ## Docs stay in sync
 
 `README.md` documents behavior; this file documents conventions for making

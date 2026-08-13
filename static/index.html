@@ -126,14 +126,39 @@
      only the type leaves every canvas rendering at its true resolution. */
   .panel { --pz: 1; }
   .panel-ctl { display: flex; align-items: center; gap: 3px; }
-  /* Fixed size, never scaled by --pz: these are chrome, not data. A zoom
-     control that grows with what it zooms walks off the title bar. */
-  .panel h2 .zoom-btn {
-    font-size: 11px; line-height: 1; padding: 3px 6px;
-    min-width: 20px; font-variant-numeric: tabular-nums;
+
+  /* The grip: drag it down to enlarge this panel's contents, up to shrink,
+     double-click to reset. Appended to every panel by app.js rather than
+     written into the markup nine times. Spans the panel edge-to-edge via
+     negative margins matched to the panel padding — the same trick the
+     title bar uses — so it reads as the panel's own bottom edge. */
+  .panel-grip {
+    flex: 0 0 auto; height: 12px; position: relative; cursor: ns-resize;
+    touch-action: none;
+    margin: 7px calc(var(--panel-pad-x) * -1) calc(var(--panel-pad-y) * -1);
+    border-top: 1px solid var(--divider);
   }
-  .panel h2 .zoom-btn:disabled { opacity: 0.3; cursor: default; }
-  .panel h2 .zoom-btn:disabled:hover { border-color: var(--btn-border); color: var(--text-dim); }
+  /* Two short bars — the conventional "grab me" texture. A bare line reads
+     as a divider; this reads as a control. */
+  .panel-grip::before {
+    content: ""; position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    width: 26px; height: 5px;
+    border-top: 2px solid var(--panel-border);
+    border-bottom: 2px solid var(--panel-border);
+    transition: border-color 0.1s;
+  }
+  .panel-grip:hover::before, .panel-grip.dragging::before { border-color: var(--accent); }
+  .panel-grip.dragging { background: rgba(232, 163, 61, 0.07); }
+  /* Live percentage while dragging, so the gesture confirms itself even on
+     a panel whose visible rows are few enough that the size change is
+     subtle. Fixed size — it is chrome, not data. */
+  .grip-readout {
+    position: absolute; right: var(--panel-pad-x); top: 50%;
+    transform: translateY(-50%);
+    font-family: var(--title-family); font-size: 9.5px;
+    color: var(--accent); pointer-events: none;
+  }
 
   .panel {
     background: var(--panel-bg);
@@ -509,7 +534,7 @@
     </div>
 
     <div class="panel" id="curve-panel">
-      <h2><span>Curve, Delta &amp; Volume</span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="curve-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="curve-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="curve-panel">hide</button></span></h2>
+      <h2><span>Curve, Delta &amp; Volume</span><span class="panel-ctl"><button class="panel-toggle" data-panel="curve-panel">hide</button></span></h2>
       <div id="curve-panel-grid">
         <div class="mini-chart-block">
           <div class="mini-chart-label">
@@ -542,7 +567,7 @@
   <div id="book-resize-handle" title="Drag to resize the order book"></div>
 
   <div id="book-pane" class="panel">
-    <h2><span>Order Book <span class="window-note" id="book-age">—</span></span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="book-pane" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="book-pane" title="Bigger">+</button><button id="book-toggle">hide</button></span></h2>
+    <h2><span>Order Book <span class="window-note" id="book-age">—</span></span><span class="panel-ctl"><button id="book-toggle">hide</button></span></h2>
     <div id="book-panel" class="visible">
       <!-- Bid/ask liquidity split over the displayed depth. A number alone
            ("62% bid") is easy to skim past; the bar is what actually reads
@@ -564,27 +589,27 @@
 
   <div id="side">
     <div class="panel" id="bots-panel">
-      <h2><span>Bots <span class="window-note" id="bots-count">—</span></span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="bots-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="bots-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="bots-panel">hide</button></span></h2>
+      <h2><span>Bots <span class="window-note" id="bots-count">—</span></span><span class="panel-ctl"><button class="panel-toggle" data-panel="bots-panel">hide</button></span></h2>
       <div id="bots-body"><div class="empty-note">scanning…</div></div>
     </div>
 
     <div class="panel" id="basis-panel">
-      <h2><span>Basis</span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="basis-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="basis-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="basis-panel">hide</button></span></h2>
+      <h2><span>Basis</span><span class="panel-ctl"><button class="panel-toggle" data-panel="basis-panel">hide</button></span></h2>
       <div id="basis-body"><div class="empty-note">need 2 legs on different venues</div></div>
     </div>
 
     <div class="panel" id="incidents-panel">
-      <h2><span>Incidents</span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="incidents-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="incidents-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="incidents-panel">hide</button></span></h2>
+      <h2><span>Incidents</span><span class="panel-ctl"><button class="panel-toggle" data-panel="incidents-panel">hide</button></span></h2>
       <div id="incidents-body"><div class="empty-note">no transitions observed yet</div></div>
     </div>
 
     <div class="panel" id="position-panel">
-      <h2><span>Position &amp; Margin</span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="position-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="position-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="position-panel">hide</button></span></h2>
+      <h2><span>Position &amp; Margin</span><span class="panel-ctl"><button class="panel-toggle" data-panel="position-panel">hide</button></span></h2>
       <div id="position-body"><div class="row"><span class="label">loading…</span></div></div>
     </div>
 
     <div class="panel" id="stats-panel">
-      <h2><span>Performance <span class="window-note" id="stats-window">—</span></span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="stats-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="stats-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="stats-panel">hide</button></span></h2>
+      <h2><span>Performance <span class="window-note" id="stats-window">—</span></span><span class="panel-ctl"><button class="panel-toggle" data-panel="stats-panel">hide</button></span></h2>
       <!-- Which run these figures cover. A performance figure with no
            stated window is not a measurement, and "the last 2000 fills"
            was a window that moved under the reader's feet and spliced
@@ -601,7 +626,7 @@
          spread captured at the moment of the fill means nothing if the mid
          walks away in the 30s that follow. -->
     <div class="panel" id="markout-panel">
-      <h2><span>Markout <span class="window-note" id="markout-note">—</span></span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="markout-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="markout-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="markout-panel">hide</button></span></h2>
+      <h2><span>Markout <span class="window-note" id="markout-note">—</span></span><span class="panel-ctl"><button class="panel-toggle" data-panel="markout-panel">hide</button></span></h2>
       <div id="markout-body"><div class="empty-note">no markout data</div></div>
     </div>
 
@@ -610,7 +635,7 @@
            series exists only for as long as someone has been watching, and
            the header says how much of it there is rather than letting the
            axis imply a session. -->
-      <h2><span>NAV <span class="window-note" id="nav-window">—</span></span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="nav-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="nav-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="nav-panel">hide</button></span></h2>
+      <h2><span>NAV <span class="window-note" id="nav-window">—</span></span><span class="panel-ctl"><button class="panel-toggle" data-panel="nav-panel">hide</button></span></h2>
       <div class="mini-chart-block">
         <div class="mini-chart-label"><span>account equity</span><span class="val" id="nav-val">—</span></div>
         <div class="mini-chart" id="nav-chart"></div>

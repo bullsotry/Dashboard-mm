@@ -1218,15 +1218,40 @@ const resizeHandle = document.getElementById("book-resize-handle");
 const sideEl = document.getElementById("side");
 const BOOK_WIDTH_KEY = "dashboard.bookWidthPx";
 const BOOK_WIDTH_MIN = 200;
+const RAIL_WIDTH_KEY = "dashboard.railWidthPx";
+const RAIL_WIDTH_MIN = 200;
+// Layout padding (2x) + chart min-width + the two 10px handle columns +
+// the 4 gaps between the 5 columns — everything in #layout that is
+// neither the book column nor the rail column.
+const FIXED_LAYOUT_OVERHEAD = 20 + 300 + 20 + 40;
 
+// Both clamps are declared here, above the first call, and exactly once.
+// They used to sit in two separate blocks and `clampBookWidth` ended up
+// defined twice; hoisting made the *later* definition win at the earlier
+// call site, where its `const` dependencies were still in the temporal
+// dead zone. That threw a ReferenceError during load for anyone with a
+// saved book width, and since an uncaught throw abandons the rest of the
+// script, every feature below this line silently stopped being wired up.
+function currentBookWidthPx() {
+  const v = parseFloat(getComputedStyle(layoutEl).getPropertyValue("--book-w"));
+  return Number.isNaN(v) ? 400 : v;
+}
+function currentRailWidthPx() {
+  const v = parseFloat(getComputedStyle(layoutEl).getPropertyValue("--rail-w"));
+  return Number.isNaN(v) ? 260 : v;
+}
 function clampBookWidth(px) {
-  // Leaves #layout's own chart min-width (300px, see grid-template-columns)
-  // room to actually apply instead of being squeezed to 0 by an oversized
-  // book on a narrow window. clientWidth includes #layout's own left+right
-  // padding (2 * var(--gap)), which isn't column space either.
-  const reserved = 20 /* layout padding */ + 300 /* chart min */ + 10 /* handle */ + 260 /* rail */ + 30 /* 3 gaps */;
-  const maxPx = Math.max(BOOK_WIDTH_MIN, layoutEl.clientWidth - reserved);
+  const maxPx = Math.max(BOOK_WIDTH_MIN, layoutEl.clientWidth - FIXED_LAYOUT_OVERHEAD - currentRailWidthPx());
   return Math.min(Math.max(px, BOOK_WIDTH_MIN), maxPx);
+}
+function clampRailWidth(px) {
+  const maxPx = Math.max(RAIL_WIDTH_MIN, layoutEl.clientWidth - FIXED_LAYOUT_OVERHEAD - currentBookWidthPx());
+  return Math.min(Math.max(px, RAIL_WIDTH_MIN), maxPx);
+}
+function setRailWidth(px, persist) {
+  const clamped = clampRailWidth(px);
+  layoutEl.style.setProperty("--rail-w", `${clamped}px`);
+  if (persist) localStorage.setItem(RAIL_WIDTH_KEY, String(clamped));
 }
 
 function setBookWidth(px, persist) {
@@ -1286,40 +1311,11 @@ window.addEventListener("resize", () => {
 
 // --- Side rail width resize ---
 // Second handle, same mechanism as the book's, between the book and the
-// rail. #layout now has 5 columns (chart, handle, book, handle, rail), so
-// each handle's clamp has to reserve the *other* variable-width column too
-// — the book's max depends on how wide the rail currently is, and vice
-// versa, not on a hardcoded 260px.
+// rail. #layout has 5 columns (chart, handle, book, handle, rail), so each
+// handle's clamp reserves the *other* variable-width column too — the
+// book's max depends on how wide the rail currently is, and vice versa,
+// not on a hardcoded 260px. Both clamps live above, with the constants.
 const railResizeHandle = document.getElementById("rail-resize-handle");
-const RAIL_WIDTH_KEY = "dashboard.railWidthPx";
-const RAIL_WIDTH_MIN = 200;
-
-function currentBookWidthPx() {
-  const v = parseFloat(getComputedStyle(layoutEl).getPropertyValue("--book-w"));
-  return Number.isNaN(v) ? 400 : v;
-}
-function currentRailWidthPx() {
-  const v = parseFloat(getComputedStyle(layoutEl).getPropertyValue("--rail-w"));
-  return Number.isNaN(v) ? 260 : v;
-}
-// Layout padding (2×) + chart min-width + the two 10px handle columns +
-// the 4 gaps between the 5 columns — everything that isn't the book or
-// the rail themselves.
-const FIXED_LAYOUT_OVERHEAD = 20 + 300 + 20 + 40;
-
-function clampBookWidth(px) {
-  const maxPx = Math.max(BOOK_WIDTH_MIN, layoutEl.clientWidth - FIXED_LAYOUT_OVERHEAD - currentRailWidthPx());
-  return Math.min(Math.max(px, BOOK_WIDTH_MIN), maxPx);
-}
-function clampRailWidth(px) {
-  const maxPx = Math.max(RAIL_WIDTH_MIN, layoutEl.clientWidth - FIXED_LAYOUT_OVERHEAD - currentBookWidthPx());
-  return Math.min(Math.max(px, RAIL_WIDTH_MIN), maxPx);
-}
-function setRailWidth(px, persist) {
-  const clamped = clampRailWidth(px);
-  layoutEl.style.setProperty("--rail-w", `${clamped}px`);
-  if (persist) localStorage.setItem(RAIL_WIDTH_KEY, String(clamped));
-}
 
 const savedRailWidth = parseFloat(localStorage.getItem(RAIL_WIDTH_KEY));
 if (!Number.isNaN(savedRailWidth)) setRailWidth(savedRailWidth, false);
@@ -1358,54 +1354,87 @@ window.addEventListener("resize", () => {
   if (!Number.isNaN(current)) setRailWidth(current, false);
 });
 
-// --- Per-panel zoom ---
-// The −/+ buttons in each panel's title bar make that panel's contents
-// bigger or smaller: every text size inside a panel is written as
-// `calc(<base>px * var(--pz))` (see index.html), so setting --pz on the
-// panel scales all of its type at once, and the panel grows with it.
+// --- Per-panel zoom (drag the grip) ---
+// Drag a panel's bottom grip down to make its contents bigger, up to make
+// them smaller, double-click to reset. Every text size inside a panel is
+// written as `calc(<base>px * var(--pz))` (see index.html), so setting
+// --pz on the panel scales all of its type at once — and since panels are
+// height:auto, the panel grows to fit. That is why there is no separate
+// height control: enlarging a panel *is* enlarging what it shows.
 //
-// Two earlier attempts at "make a panel bigger" shipped a *height* drag
-// instead and were both wrong — this is the feature that was actually
-// wanted. Height needs no control of its own: a panel is height:auto, so
-// zooming in is what makes it taller.
+// The grip elements are built here rather than repeated nine times in the
+// markup, so a new panel becomes zoomable by existing, not by remembering
+// to paste a div.
 const ZOOM_KEY_PREFIX = "dashboard.zoom.";
-// Multiplicative steps rather than +1px: at 9.5px a fixed increment is a
-// 10% jump and at 14px it's 7%, so the panel's own size hierarchy would
-// flatten out as you zoom. A ratio keeps every size in proportion.
-const ZOOM_STEPS = [0.8, 0.9, 1, 1.15, 1.3, 1.5, 1.75, 2];
-const ZOOM_DEFAULT_IX = ZOOM_STEPS.indexOf(1);
+const ZOOM_MIN = 0.75;
+const ZOOM_MAX = 2.5;
+// Pixels of drag per 1.0 of zoom. Low enough that the panel visibly
+// responds within the first few pixels of the gesture, high enough that
+// the full range needs a deliberate pull rather than a twitch.
+const ZOOM_PX_PER_UNIT = 220;
+// The main chart pane is excluded: its candles are a canvas that scales
+// with the pane, not type, so a text zoom there would move only the
+// overlay label. #curve-panel, nested inside it, is included on its own.
+const ZOOM_EXCLUDE = new Set(["chart-pane"]);
 
-document.querySelectorAll("button.zoom-btn[data-zoom-in], button.zoom-btn[data-zoom-out]").forEach((btn) => {
-  const panelId = btn.dataset.zoomIn || btn.dataset.zoomOut;
-  const panel = document.getElementById(panelId);
-  if (!panel) return;
-  const dir = btn.dataset.zoomIn ? 1 : -1;
-  btn.addEventListener("click", () => setPanelZoom(panelId, currentZoomIx(panelId) + dir));
+const clampZoom = (z) => Math.min(Math.max(z, ZOOM_MIN), ZOOM_MAX);
+
+document.querySelectorAll(".panel[id]").forEach((panel) => {
+  if (ZOOM_EXCLUDE.has(panel.id)) return;
+
+  const grip = document.createElement("div");
+  grip.className = "panel-grip";
+  grip.title = "Drag down to enlarge, up to shrink — double-click to reset";
+  const readout = document.createElement("span");
+  readout.className = "grip-readout";
+  grip.appendChild(readout);
+  panel.appendChild(grip);
+
+  const key = ZOOM_KEY_PREFIX + panel.id;
+  const saved = parseFloat(localStorage.getItem(key));
+  let pz = Number.isNaN(saved) ? 1 : clampZoom(saved);
+  const apply = () => panel.style.setProperty("--pz", String(pz));
+  apply();
+
+  let dragging = false;
+  let startY = 0;
+  let startPz = 1;
+
+  grip.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    startY = e.clientY;
+    startPz = pz;
+    grip.classList.add("dragging");
+    grip.setPointerCapture(e.pointerId);
+    document.body.style.cursor = "ns-resize";
+    document.body.style.userSelect = "none";
+    readout.textContent = `${Math.round(pz * 100)}%`;
+    e.preventDefault();
+  });
+  grip.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    pz = clampZoom(startPz + (e.clientY - startY) / ZOOM_PX_PER_UNIT);
+    apply();
+    readout.textContent = `${Math.round(pz * 100)}%`;
+  });
+  function endZoomDrag(e) {
+    if (!dragging) return;
+    dragging = false;
+    grip.classList.remove("dragging");
+    if (e && grip.hasPointerCapture(e.pointerId)) grip.releasePointerCapture(e.pointerId);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    readout.textContent = "";
+    localStorage.setItem(key, pz.toFixed(3));
+  }
+  grip.addEventListener("pointerup", endZoomDrag);
+  grip.addEventListener("pointercancel", endZoomDrag);
+  grip.addEventListener("dblclick", () => {
+    pz = 1;
+    apply();
+    localStorage.setItem(key, "1");
+  });
 });
-
-function currentZoomIx(panelId) {
-  const stored = parseInt(localStorage.getItem(ZOOM_KEY_PREFIX + panelId), 10);
-  return Number.isNaN(stored) ? ZOOM_DEFAULT_IX : stored;
-}
-
-function setPanelZoom(panelId, ix) {
-  const panel = document.getElementById(panelId);
-  if (!panel) return;
-  const clamped = Math.min(Math.max(ix, 0), ZOOM_STEPS.length - 1);
-  panel.style.setProperty("--pz", String(ZOOM_STEPS[clamped]));
-  localStorage.setItem(ZOOM_KEY_PREFIX + panelId, String(clamped));
-  // Greyed out at the ends, so the control says when there is no more
-  // room to go rather than silently doing nothing on click.
-  const out = document.querySelector(`button.zoom-btn[data-zoom-out="${panelId}"]`);
-  const inn = document.querySelector(`button.zoom-btn[data-zoom-in="${panelId}"]`);
-  if (out) out.disabled = clamped === 0;
-  if (inn) inn.disabled = clamped === ZOOM_STEPS.length - 1;
-}
-
-// Apply whatever was saved last session, before the first poll paints.
-new Set(
-  [...document.querySelectorAll("button.zoom-btn[data-zoom-in]")].map((b) => b.dataset.zoomIn),
-).forEach((panelId) => setPanelZoom(panelId, currentZoomIx(panelId)));
 
 // --- Freshness tracking ---
 let lastGoodPollTs = 0; // local clock, for link health
