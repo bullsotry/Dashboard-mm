@@ -111,31 +111,29 @@
     #book-resize-handle, #rail-resize-handle { display: none; }
   }
 
-  /* Per-panel height resize. First cut used native CSS `resize: vertical`
-     and it was a mistake: its grab corner is a near-invisible triangle
-     against this dashboard's near-black panels, tiny, and inconsistent
-     across browsers — a working feature that read as broken. Same fix as
-     the two column handles above: a real, full-width bar with its own
-     pointer-capture drag, placed under each resizable block (see
-     .v-resize-handle below). */
-  .resizable { overflow-y: auto; overflow-x: hidden; min-height: 40px; }
-  /* Charts resize themselves via the ResizeObserver already wired in
-     makeMiniChart (see app.js) — `overflow: hidden` instead of `auto`
-     since a mini-chart never needs its own scrollbar. */
-  .mini-chart.resizable { overflow: hidden; }
+  /* ── Per-panel zoom ───────────────────────────────────────────────────
+     Every text size inside a panel is `calc(<base>px * var(--pz))`, and
+     the −/+ buttons in the panel's title bar set `--pz` on that panel.
+     The panel has `height: auto`, so bigger text makes the panel itself
+     grow — which is the point: a figure you want to read from across the
+     room needs the room to read it in.
 
-  .v-resize-handle {
-    height: 9px; margin-top: 1px; cursor: row-resize; position: relative;
-    touch-action: none;
+     Deliberately NOT CSS `zoom` or `transform: scale()`, which would have
+     been one line: the mini-charts and the order book draw into a canvas
+     (lightweight-charts, plus price_tags.js's own custom primitive doing
+     hit-testing in pixel coordinates). Scaling their container blurs the
+     canvas and desynchronises those coordinates from the pointer. Scaling
+     only the type leaves every canvas rendering at its true resolution. */
+  .panel { --pz: 1; }
+  .panel-ctl { display: flex; align-items: center; gap: 3px; }
+  /* Fixed size, never scaled by --pz: these are chrome, not data. A zoom
+     control that grows with what it zooms walks off the title bar. */
+  .panel h2 .zoom-btn {
+    font-size: 11px; line-height: 1; padding: 3px 6px;
+    min-width: 20px; font-variant-numeric: tabular-nums;
   }
-  .v-resize-handle::before {
-    content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 2px;
-    transform: translateY(-50%); background: var(--panel-border);
-    transition: background 0.1s;
-  }
-  .v-resize-handle:hover::before, .v-resize-handle.dragging::before {
-    background: var(--accent); height: 3px;
-  }
+  .panel h2 .zoom-btn:disabled { opacity: 0.3; cursor: default; }
+  .panel h2 .zoom-btn:disabled:hover { border-color: var(--btn-border); color: var(--text-dim); }
 
   .panel {
     background: var(--panel-bg);
@@ -145,7 +143,7 @@
   }
   .panel h2 {
     font-family: var(--title-family);
-    font-size: var(--title-size);
+    font-size: calc(var(--title-size) * var(--pz));
     font-weight: var(--title-weight);
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -261,7 +259,7 @@
      single 1/3-width track and look broken; spanning the full row makes
      clear that Volume is deliberately alone here, not a layout glitch. */
   #curve-panel-grid.only-volume #volume-curve-block { grid-column: 1 / -1; }
-  #curve-panel .mini-chart { height: 260px; }
+  #curve-panel .mini-chart { height: calc(260px * var(--pz)); }
   @media (max-width: 700px) {
     #curve-panel-grid { grid-template-columns: 1fr; }
   }
@@ -294,7 +292,7 @@
      never show. A gap that only ever grows means the two legs are drifting
      apart, not just noisily different — the sparkline is what tells "always
      been this way" apart from "just started moving". */
-  .basis-row .val { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .basis-row .val { display: flex; align-items: center; gap: 6px; font-size: calc(12px * var(--pz)); }
   .basis-spark { color: inherit; vertical-align: middle; flex: 0 0 auto; }
   .basis-row .val small { font-weight: 400; color: var(--text-faint); }
 
@@ -303,16 +301,16 @@
     flex: 1 1 auto; min-width: 0;
     background: var(--panel-bg); color: var(--text);
     border: 1px solid var(--panel-border); border-radius: 4px;
-    font: inherit; font-size: 11px; padding: 2px 4px;
+    font: inherit; font-size: calc(11px * var(--pz)); padding: 2px 4px;
   }
-  .session-note { font-size: 10px; color: var(--text-faint); white-space: nowrap; }
+  .session-note { font-size: calc(10px * var(--pz)); color: var(--text-faint); white-space: nowrap; }
 
   /* A markout profile is read left-to-right as time since the fill, so the
      rows are horizons and the bar diverges from a centre line at zero:
      right of centre is edge kept, left is edge given back. Colour alone
      would not survive a glance, the side of the axis does. */
-  .mo-row { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 1px 0; }
-  .mo-row .h { width: 34px; color: var(--text-dim); font-family: var(--title-family); }
+  .mo-row { display: flex; align-items: center; gap: 6px; font-size: calc(11px * var(--pz)); padding: 1px 0; }
+  .mo-row .h { width: calc(34px * var(--pz)); color: var(--text-dim); font-family: var(--title-family); }
   .mo-track {
     position: relative; flex: 1 1 auto; height: 9px;
     background: linear-gradient(var(--divider), var(--divider)) center / 1px 100% no-repeat;
@@ -320,13 +318,13 @@
   .mo-bar { position: absolute; top: 1px; height: 7px; }
   .mo-bar.pos { background: var(--bull); left: 50%; }
   .mo-bar.neg { background: var(--bear); right: 50%; }
-  .mo-val { width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
-  .mo-sides { font-size: 9.5px; color: var(--text-faint); width: 86px; text-align: right; }
-  .mo-legend { font-size: 9.5px; color: var(--text-faint); margin-top: 4px; line-height: 1.35; }
+  .mo-val { width: calc(52px * var(--pz)); text-align: right; font-variant-numeric: tabular-nums; }
+  .mo-sides { font-size: calc(9.5px * var(--pz)); color: var(--text-faint); width: calc(86px * var(--pz)); text-align: right; }
+  .mo-legend { font-size: calc(9.5px * var(--pz)); color: var(--text-faint); margin-top: 4px; line-height: 1.35; }
   /* Deliberately quieter than .pnl-blocked: that one refuses a number, this
      one merely declines to vouch for it. */
   .pnl-unverified {
-    font-size: 10px; color: var(--text-faint); font-style: italic;
+    font-size: calc(10px * var(--pz)); color: var(--text-faint); font-style: italic;
     margin-top: 3px; line-height: 1.3;
   }
   /* A leg too old to price is listed, not hidden: it reads as an absence,
@@ -337,19 +335,19 @@
   /* Recorded by a background thread independent of the browser polling, so
      a halt that happens while nobody is watching still shows up here —
      the whole reason this exists instead of just the live/warn/dead dot. */
-  #incidents-body { height: 160px; }
-  .incident-row { font-size: 10.5px; padding: 2px 0; }
+  #incidents-body { max-height: 160px; overflow-y: auto; }
+  .incident-row { font-size: calc(10.5px * var(--pz)); padding: 2px 0; }
   .incident-row .label { font-family: ui-monospace, Menlo, monospace; }
   .incident-row .val { font-weight: 600; }
   .incident-row .val small { font-weight: 400; color: var(--text-faint); margin-left: 4px; }
 
-  .row { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; padding: 1.5px 0; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; font-size: calc(12px * var(--pz)); padding: 1.5px 0; }
   .row .label { color: var(--text-dim); }
   .row .val { font-family: ui-monospace, Menlo, monospace; color: var(--text); }
   .pos-group { padding: 3px 0; }
   .pos-group + .pos-group { border-top: 1px solid var(--divider); margin-top: 4px; }
   .pos-side-label {
-    font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+    font-size: calc(10px * var(--pz)); font-weight: 700; letter-spacing: 0.06em;
     padding: 0 5px; border-radius: var(--btn-radius); display: inline-block; margin-bottom: 2px;
   }
   .pos-side-label.long { color: var(--bull); background: rgba(14, 203, 129, 0.14); }
@@ -357,13 +355,13 @@
   .pnl-pos { color: var(--bull); }
   .pnl-neg { color: var(--bear); }
   .account-block { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--divider); }
-  .empty-note { color: var(--text-faint); font-size: 12px; font-style: italic; }
+  .empty-note { color: var(--text-faint); font-size: calc(12px * var(--pz)); font-style: italic; }
 
   /* Every figure in the stats panel is computed over a bounded fills
      window, so the panel states that window in its own header rather than
      letting the reader assume "today". */
   .window-note {
-    font-size: 10px; color: var(--text-faint); text-transform: none;
+    font-size: calc(10px * var(--pz)); color: var(--text-faint); text-transform: none;
     letter-spacing: 0; font-weight: 400;
   }
   /* Bot list. Discovered bots are always listed, running or not — a bot
@@ -375,7 +373,7 @@
   .bot-row {
     display: flex; flex-direction: column; gap: 2px;
     padding: 4px 6px; margin: 0 -6px;
-    cursor: pointer; font-size: 12px;
+    cursor: pointer; font-size: calc(12px * var(--pz));
     border-left: 2px solid transparent;
   }
   .bot-row:hover { background: var(--btn-bg-active); }
@@ -387,13 +385,13 @@
   .bot-row.dead .dot { background: var(--bear); }
   .bot-row .name { flex: 1 1 auto; font-family: ui-monospace, Menlo, monospace; }
   .bot-row.dead .name { color: var(--text-faint); }
-  .bot-row .age { font-size: 10.5px; color: var(--text-faint); font-family: ui-monospace, Menlo, monospace; }
-  .bot-row .nochart { font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+  .bot-row .age { font-size: calc(10.5px * var(--pz)); color: var(--text-faint); font-family: ui-monospace, Menlo, monospace; }
+  .bot-row .nochart { font-size: calc(9.5px * var(--pz)); color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
   .bot-row .bottom-line {
     display: flex; align-items: center; gap: 6px; padding-left: 14px;
-    font-family: ui-monospace, Menlo, monospace; font-size: 10.5px;
+    font-family: ui-monospace, Menlo, monospace; font-size: calc(10.5px * var(--pz));
   }
-  .bot-row .bottom-line .pos-side-label { font-size: 9px; padding: 0 4px; margin-bottom: 0; }
+  .bot-row .bottom-line .pos-side-label { font-size: calc(9px * var(--pz)); padding: 0 4px; margin-bottom: 0; }
   /* :not() keeps this from outranking .pnl-pos/.pnl-neg, which need to win
      here exactly as they do everywhere else in the rail. */
   .bot-row .bottom-line .val:not(.pnl-pos):not(.pnl-neg) { color: var(--text-dim); }
@@ -402,12 +400,12 @@
   /* Shown instead of a realised PnL that cannot be defended. Deliberately
      carries no number: a greyed-out figure is still a figure to be read. */
   .pnl-blocked-title {
-    font-family: var(--title-family); font-size: 10.5px; font-weight: 700;
+    font-family: var(--title-family); font-size: calc(10.5px * var(--pz)); font-weight: 700;
     text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent);
   }
-  .pnl-blocked-why { font-size: 11px; color: var(--text-faint); line-height: 1.4; margin-top: 3px; }
-  .stat-net .val { font-size: 14px; font-weight: 700; }
-  .row .val small { color: var(--text-faint); font-size: 10.5px; margin-left: 4px; }
+  .pnl-blocked-why { font-size: calc(11px * var(--pz)); color: var(--text-faint); line-height: 1.4; margin-top: 3px; }
+  .stat-net .val { font-size: calc(14px * var(--pz)); font-weight: 700; }
+  .row .val small { color: var(--text-faint); font-size: calc(10.5px * var(--pz)); margin-left: 4px; }
 
   /* Order book has its own wide column now (see #layout), not a cramped
      250px rail slot — bigger rows and more depth actually make use of the
@@ -424,15 +422,15 @@
   }
   .imb-fill-bid { height: 100%; background: var(--bull); }
   .imb-label {
-    font-family: ui-monospace, Menlo, monospace; font-size: 10.5px;
+    font-family: ui-monospace, Menlo, monospace; font-size: calc(10.5px * var(--pz));
     color: var(--text-dim); white-space: nowrap; flex: 0 0 auto;
   }
   .book-header {
     display: flex; justify-content: space-between;
-    font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
+    font-size: calc(11px * var(--pz)); color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
     padding: 0 6px 4px;
   }
-  .book-side { font-family: ui-monospace, Menlo, monospace; font-size: 14px; flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+  .book-side { font-family: ui-monospace, Menlo, monospace; font-size: calc(14px * var(--pz)); flex: 1 1 auto; overflow-y: auto; min-height: 0; }
   .book-row {
     position: relative;
     display: flex; justify-content: space-between;
@@ -456,12 +454,12 @@
      still where the bot is waiting — so it gets a one-line mention instead
      of silently vanishing past the depth cutoff. */
   .own-off-depth {
-    font-size: 11px; color: var(--accent); font-family: ui-monospace, Menlo, monospace;
+    font-size: calc(11px * var(--pz)); color: var(--accent); font-family: ui-monospace, Menlo, monospace;
     padding: 2px 6px;
   }
   .own-off-depth:empty { display: none; }
   .spread-line {
-    text-align: center; font-size: 12px; color: var(--text-dim);
+    text-align: center; font-size: calc(12px * var(--pz)); color: var(--text-dim);
     padding: 5px 0; border-top: 1px solid var(--divider); border-bottom: 1px solid var(--divider);
     margin: 4px 0 6px 0;
   }
@@ -474,16 +472,16 @@
   #nav-panel .mini-chart-block + .mini-chart-block { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--divider); }
   .mini-chart-label {
     display: flex; justify-content: space-between; align-items: baseline;
-    font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
+    font-size: calc(9.5px * var(--pz)); color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
     margin-bottom: 2px;
   }
-  .mini-chart-label .val { font-size: 11px; font-family: ui-monospace, Menlo, monospace; text-transform: none; letter-spacing: 0; }
+  .mini-chart-label .val { font-size: calc(11px * var(--pz)); font-family: ui-monospace, Menlo, monospace; text-transform: none; letter-spacing: 0; }
   /* Two figures sharing one header row (e.g. realised pnl + its max
      drawdown) — the primary number stays full-size, the sub-figure is
      dimmed and smaller so it reads as context, not a second headline. */
   .mini-chart-vals { display: flex; align-items: baseline; gap: 6px; }
-  .mini-chart-vals .val-sub { font-size: 9.5px; color: var(--text-faint); }
-  .mini-chart { height: 60px; }
+  .mini-chart-vals .val-sub { font-size: calc(9.5px * var(--pz)); color: var(--text-faint); }
+  .mini-chart { height: calc(60px * var(--pz)); }
 
   /* Below ~900px the fixed 300px rail leaves the chart unusably narrow, so
      the panels stack under it instead of beside it. */
@@ -511,7 +509,7 @@
     </div>
 
     <div class="panel" id="curve-panel">
-      <h2><span>Curve, Delta &amp; Volume</span><button class="panel-toggle" data-panel="curve-panel">hide</button></h2>
+      <h2><span>Curve, Delta &amp; Volume</span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="curve-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="curve-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="curve-panel">hide</button></span></h2>
       <div id="curve-panel-grid">
         <div class="mini-chart-block">
           <div class="mini-chart-label">
@@ -521,13 +519,11 @@
               <span class="val val-sub" id="curve-dd-val">dd —</span>
             </span>
           </div>
-          <div class="mini-chart resizable" id="curve-chart"></div>
-          <div class="v-resize-handle" data-target="curve-chart" title="Drag to resize"></div>
+          <div class="mini-chart" id="curve-chart"></div>
         </div>
         <div class="mini-chart-block">
           <div class="mini-chart-label"><span>inventory (base)</span><span class="val" id="delta-val">—</span></div>
-          <div class="mini-chart resizable" id="delta-chart"></div>
-          <div class="v-resize-handle" data-target="delta-chart" title="Drag to resize"></div>
+          <div class="mini-chart" id="delta-chart"></div>
         </div>
         <!-- Volume is a plain running sum of price*size, so unlike the two
              blocks above it stays honest even on a window curve-empty is
@@ -535,8 +531,7 @@
              blocks curve-empty toggles, and its own empty state. -->
         <div class="mini-chart-block" id="volume-curve-block">
           <div class="mini-chart-label"><span>volume traded (cum., quote)</span><span class="val" id="volume-curve-val">—</span></div>
-          <div class="mini-chart resizable" id="volume-curve-chart"></div>
-          <div class="v-resize-handle" data-target="volume-curve-chart" title="Drag to resize"></div>
+          <div class="mini-chart" id="volume-curve-chart"></div>
         </div>
       </div>
       <div class="empty-note" id="curve-empty">no fills yet</div>
@@ -547,7 +542,7 @@
   <div id="book-resize-handle" title="Drag to resize the order book"></div>
 
   <div id="book-pane" class="panel">
-    <h2><span>Order Book <span class="window-note" id="book-age">—</span></span><button id="book-toggle">hide</button></h2>
+    <h2><span>Order Book <span class="window-note" id="book-age">—</span></span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="book-pane" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="book-pane" title="Bigger">+</button><button id="book-toggle">hide</button></span></h2>
     <div id="book-panel" class="visible">
       <!-- Bid/ask liquidity split over the displayed depth. A number alone
            ("62% bid") is easy to skim past; the bar is what actually reads
@@ -569,31 +564,27 @@
 
   <div id="side">
     <div class="panel" id="bots-panel">
-      <h2><span>Bots <span class="window-note" id="bots-count">—</span></span><button class="panel-toggle" data-panel="bots-panel">hide</button></h2>
-      <div id="bots-body" class="resizable"><div class="empty-note">scanning…</div></div>
-      <div class="v-resize-handle" data-target="bots-body" title="Drag to resize"></div>
+      <h2><span>Bots <span class="window-note" id="bots-count">—</span></span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="bots-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="bots-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="bots-panel">hide</button></span></h2>
+      <div id="bots-body"><div class="empty-note">scanning…</div></div>
     </div>
 
     <div class="panel" id="basis-panel">
-      <h2><span>Basis</span><button class="panel-toggle" data-panel="basis-panel">hide</button></h2>
-      <div id="basis-body" class="resizable"><div class="empty-note">need 2 legs on different venues</div></div>
-      <div class="v-resize-handle" data-target="basis-body" title="Drag to resize"></div>
+      <h2><span>Basis</span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="basis-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="basis-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="basis-panel">hide</button></span></h2>
+      <div id="basis-body"><div class="empty-note">need 2 legs on different venues</div></div>
     </div>
 
     <div class="panel" id="incidents-panel">
-      <h2><span>Incidents</span><button class="panel-toggle" data-panel="incidents-panel">hide</button></h2>
-      <div id="incidents-body" class="resizable"><div class="empty-note">no transitions observed yet</div></div>
-      <div class="v-resize-handle" data-target="incidents-body" title="Drag to resize"></div>
+      <h2><span>Incidents</span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="incidents-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="incidents-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="incidents-panel">hide</button></span></h2>
+      <div id="incidents-body"><div class="empty-note">no transitions observed yet</div></div>
     </div>
 
     <div class="panel" id="position-panel">
-      <h2><span>Position &amp; Margin</span><button class="panel-toggle" data-panel="position-panel">hide</button></h2>
-      <div id="position-body" class="resizable"><div class="row"><span class="label">loading…</span></div></div>
-      <div class="v-resize-handle" data-target="position-body" title="Drag to resize"></div>
+      <h2><span>Position &amp; Margin</span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="position-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="position-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="position-panel">hide</button></span></h2>
+      <div id="position-body"><div class="row"><span class="label">loading…</span></div></div>
     </div>
 
     <div class="panel" id="stats-panel">
-      <h2><span>Performance <span class="window-note" id="stats-window">—</span></span><button class="panel-toggle" data-panel="stats-panel">hide</button></h2>
+      <h2><span>Performance <span class="window-note" id="stats-window">—</span></span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="stats-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="stats-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="stats-panel">hide</button></span></h2>
       <!-- Which run these figures cover. A performance figure with no
            stated window is not a measurement, and "the last 2000 fills"
            was a window that moved under the reader's feet and spliced
@@ -602,8 +593,7 @@
         <select id="session-select" title="which run to measure"></select>
         <span class="session-note" id="session-note"></span>
       </div>
-      <div id="stats-body" class="resizable"><div class="empty-note">no fills yet</div></div>
-      <div class="v-resize-handle" data-target="stats-body" title="Drag to resize"></div>
+      <div id="stats-body"><div class="empty-note">no fills yet</div></div>
     </div>
 
     <!-- Reads directly under Performance on purpose: that panel answers
@@ -611,9 +601,8 @@
          spread captured at the moment of the fill means nothing if the mid
          walks away in the 30s that follow. -->
     <div class="panel" id="markout-panel">
-      <h2><span>Markout <span class="window-note" id="markout-note">—</span></span><button class="panel-toggle" data-panel="markout-panel">hide</button></h2>
-      <div id="markout-body" class="resizable"><div class="empty-note">no markout data</div></div>
-      <div class="v-resize-handle" data-target="markout-body" title="Drag to resize"></div>
+      <h2><span>Markout <span class="window-note" id="markout-note">—</span></span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="markout-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="markout-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="markout-panel">hide</button></span></h2>
+      <div id="markout-body"><div class="empty-note">no markout data</div></div>
     </div>
 
     <div class="panel" id="nav-panel">
@@ -621,11 +610,10 @@
            series exists only for as long as someone has been watching, and
            the header says how much of it there is rather than letting the
            axis imply a session. -->
-      <h2><span>NAV <span class="window-note" id="nav-window">—</span></span><button class="panel-toggle" data-panel="nav-panel">hide</button></h2>
+      <h2><span>NAV <span class="window-note" id="nav-window">—</span></span><span class="panel-ctl"><button class="zoom-btn" data-zoom-out="nav-panel" title="Smaller">&minus;</button><button class="zoom-btn" data-zoom-in="nav-panel" title="Bigger">+</button><button class="panel-toggle" data-panel="nav-panel">hide</button></span></h2>
       <div class="mini-chart-block">
         <div class="mini-chart-label"><span>account equity</span><span class="val" id="nav-val">—</span></div>
-        <div class="mini-chart resizable" id="nav-chart"></div>
-        <div class="v-resize-handle" data-target="nav-chart" title="Drag to resize"></div>
+        <div class="mini-chart" id="nav-chart"></div>
       </div>
       <div class="empty-note" id="nav-empty">account margin unavailable</div>
     </div>

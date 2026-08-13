@@ -1358,51 +1358,54 @@ window.addEventListener("resize", () => {
   if (!Number.isNaN(current)) setRailWidth(current, false);
 });
 
-// --- Per-panel height resize ---
-// First cut used native CSS `resize: vertical` on the body divs. Dropped:
-// its grab corner is a tiny, near-invisible triangle against this
-// dashboard's near-black panels — a working feature that read as broken.
-// Same mechanism as the two column handles above instead: a real,
-// full-width `.v-resize-handle` bar (see index.html) with its own
-// pointer-capture drag, one per resizable block, persisted per element id.
-const RESIZE_KEY_PREFIX = "dashboard.resizeH.";
-const V_RESIZE_MIN = 40;
-document.querySelectorAll(".v-resize-handle[data-target]").forEach((handle) => {
-  const target = document.getElementById(handle.dataset.target);
-  if (!target) return;
-  const key = RESIZE_KEY_PREFIX + target.id;
-  const stored = parseFloat(localStorage.getItem(key));
-  if (!Number.isNaN(stored)) target.style.height = `${stored}px`;
+// --- Per-panel zoom ---
+// The −/+ buttons in each panel's title bar make that panel's contents
+// bigger or smaller: every text size inside a panel is written as
+// `calc(<base>px * var(--pz))` (see index.html), so setting --pz on the
+// panel scales all of its type at once, and the panel grows with it.
+//
+// Two earlier attempts at "make a panel bigger" shipped a *height* drag
+// instead and were both wrong — this is the feature that was actually
+// wanted. Height needs no control of its own: a panel is height:auto, so
+// zooming in is what makes it taller.
+const ZOOM_KEY_PREFIX = "dashboard.zoom.";
+// Multiplicative steps rather than +1px: at 9.5px a fixed increment is a
+// 10% jump and at 14px it's 7%, so the panel's own size hierarchy would
+// flatten out as you zoom. A ratio keeps every size in proportion.
+const ZOOM_STEPS = [0.8, 0.9, 1, 1.15, 1.3, 1.5, 1.75, 2];
+const ZOOM_DEFAULT_IX = ZOOM_STEPS.indexOf(1);
 
-  let dragging = false;
-  let startY = 0;
-  let startH = 0;
-  handle.addEventListener("pointerdown", (e) => {
-    dragging = true;
-    handle.classList.add("dragging");
-    handle.setPointerCapture(e.pointerId);
-    startY = e.clientY;
-    startH = target.getBoundingClientRect().height;
-    document.body.style.cursor = "row-resize";
-    document.body.style.userSelect = "none";
-    e.preventDefault();
-  });
-  handle.addEventListener("pointermove", (e) => {
-    if (!dragging) return;
-    target.style.height = `${Math.max(V_RESIZE_MIN, startH + (e.clientY - startY))}px`;
-  });
-  function endVResize(e) {
-    if (!dragging) return;
-    dragging = false;
-    handle.classList.remove("dragging");
-    if (e && handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
-    document.body.style.cursor = "";
-    document.body.style.userSelect = "";
-    localStorage.setItem(key, String(Math.round(target.getBoundingClientRect().height)));
-  }
-  handle.addEventListener("pointerup", endVResize);
-  handle.addEventListener("pointercancel", endVResize);
+document.querySelectorAll("button.zoom-btn[data-zoom-in], button.zoom-btn[data-zoom-out]").forEach((btn) => {
+  const panelId = btn.dataset.zoomIn || btn.dataset.zoomOut;
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+  const dir = btn.dataset.zoomIn ? 1 : -1;
+  btn.addEventListener("click", () => setPanelZoom(panelId, currentZoomIx(panelId) + dir));
 });
+
+function currentZoomIx(panelId) {
+  const stored = parseInt(localStorage.getItem(ZOOM_KEY_PREFIX + panelId), 10);
+  return Number.isNaN(stored) ? ZOOM_DEFAULT_IX : stored;
+}
+
+function setPanelZoom(panelId, ix) {
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+  const clamped = Math.min(Math.max(ix, 0), ZOOM_STEPS.length - 1);
+  panel.style.setProperty("--pz", String(ZOOM_STEPS[clamped]));
+  localStorage.setItem(ZOOM_KEY_PREFIX + panelId, String(clamped));
+  // Greyed out at the ends, so the control says when there is no more
+  // room to go rather than silently doing nothing on click.
+  const out = document.querySelector(`button.zoom-btn[data-zoom-out="${panelId}"]`);
+  const inn = document.querySelector(`button.zoom-btn[data-zoom-in="${panelId}"]`);
+  if (out) out.disabled = clamped === 0;
+  if (inn) inn.disabled = clamped === ZOOM_STEPS.length - 1;
+}
+
+// Apply whatever was saved last session, before the first poll paints.
+new Set(
+  [...document.querySelectorAll("button.zoom-btn[data-zoom-in]")].map((b) => b.dataset.zoomIn),
+).forEach((panelId) => setPanelZoom(panelId, currentZoomIx(panelId)));
 
 // --- Freshness tracking ---
 let lastGoodPollTs = 0; // local clock, for link health

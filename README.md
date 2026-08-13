@@ -13,6 +13,13 @@ the bot list, cross-venue basis, incidents, order book, position & margin,
 performance panel and NAV. The backend is a single FastAPI route
 (`/snapshot`) that the frontend polls; everything else is a static file.
 
+Every panel's title bar carries `−` / `+` / `hide`: zoom that panel's type
+up or down, or collapse it to just its title bar. Both choices persist per
+panel in `localStorage`, as do the two column widths (drag the dividers
+either side of the order book). Zoom scales only text — the charts and the
+order book render into a canvas, and scaling those containers would blur
+them and desynchronise `price_tags.js`'s pixel hit-testing.
+
 ## Freshness is a first-class signal
 
 The failure mode this dashboard is built to avoid is showing frozen data that
