@@ -111,20 +111,31 @@
     #book-resize-handle, #rail-resize-handle { display: none; }
   }
 
-  /* Per-panel height resize: native CSS `resize`, not a custom JS drag
-     handle — these are simple list/chart containers stacked vertically in
-     a rail that already scrolls itself, so the browser's own bottom-right
-     grab corner is enough and needs no bespoke pointer-capture logic like
-     the column handles above (those move a shared boundary between two
-     neighbours; a body resize only ever affects itself). */
-  .resizable {
-    resize: vertical; overflow-y: auto; overflow-x: hidden;
-    min-height: 40px;
-  }
+  /* Per-panel height resize. First cut used native CSS `resize: vertical`
+     and it was a mistake: its grab corner is a near-invisible triangle
+     against this dashboard's near-black panels, tiny, and inconsistent
+     across browsers — a working feature that read as broken. Same fix as
+     the two column handles above: a real, full-width bar with its own
+     pointer-capture drag, placed under each resizable block (see
+     .v-resize-handle below). */
+  .resizable { overflow-y: auto; overflow-x: hidden; min-height: 40px; }
   /* Charts resize themselves via the ResizeObserver already wired in
      makeMiniChart (see app.js) — `overflow: hidden` instead of `auto`
      since a mini-chart never needs its own scrollbar. */
   .mini-chart.resizable { overflow: hidden; }
+
+  .v-resize-handle {
+    height: 9px; margin-top: 1px; cursor: row-resize; position: relative;
+    touch-action: none;
+  }
+  .v-resize-handle::before {
+    content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 2px;
+    transform: translateY(-50%); background: var(--panel-border);
+    transition: background 0.1s;
+  }
+  .v-resize-handle:hover::before, .v-resize-handle.dragging::before {
+    background: var(--accent); height: 3px;
+  }
 
   .panel {
     background: var(--panel-bg);
@@ -511,10 +522,12 @@
             </span>
           </div>
           <div class="mini-chart resizable" id="curve-chart"></div>
+          <div class="v-resize-handle" data-target="curve-chart" title="Drag to resize"></div>
         </div>
         <div class="mini-chart-block">
           <div class="mini-chart-label"><span>inventory (base)</span><span class="val" id="delta-val">—</span></div>
           <div class="mini-chart resizable" id="delta-chart"></div>
+          <div class="v-resize-handle" data-target="delta-chart" title="Drag to resize"></div>
         </div>
         <!-- Volume is a plain running sum of price*size, so unlike the two
              blocks above it stays honest even on a window curve-empty is
@@ -523,6 +536,7 @@
         <div class="mini-chart-block" id="volume-curve-block">
           <div class="mini-chart-label"><span>volume traded (cum., quote)</span><span class="val" id="volume-curve-val">—</span></div>
           <div class="mini-chart resizable" id="volume-curve-chart"></div>
+          <div class="v-resize-handle" data-target="volume-curve-chart" title="Drag to resize"></div>
         </div>
       </div>
       <div class="empty-note" id="curve-empty">no fills yet</div>
@@ -557,21 +571,25 @@
     <div class="panel" id="bots-panel">
       <h2><span>Bots <span class="window-note" id="bots-count">—</span></span><button class="panel-toggle" data-panel="bots-panel">hide</button></h2>
       <div id="bots-body" class="resizable"><div class="empty-note">scanning…</div></div>
+      <div class="v-resize-handle" data-target="bots-body" title="Drag to resize"></div>
     </div>
 
     <div class="panel" id="basis-panel">
       <h2><span>Basis</span><button class="panel-toggle" data-panel="basis-panel">hide</button></h2>
       <div id="basis-body" class="resizable"><div class="empty-note">need 2 legs on different venues</div></div>
+      <div class="v-resize-handle" data-target="basis-body" title="Drag to resize"></div>
     </div>
 
     <div class="panel" id="incidents-panel">
       <h2><span>Incidents</span><button class="panel-toggle" data-panel="incidents-panel">hide</button></h2>
       <div id="incidents-body" class="resizable"><div class="empty-note">no transitions observed yet</div></div>
+      <div class="v-resize-handle" data-target="incidents-body" title="Drag to resize"></div>
     </div>
 
     <div class="panel" id="position-panel">
       <h2><span>Position &amp; Margin</span><button class="panel-toggle" data-panel="position-panel">hide</button></h2>
       <div id="position-body" class="resizable"><div class="row"><span class="label">loading…</span></div></div>
+      <div class="v-resize-handle" data-target="position-body" title="Drag to resize"></div>
     </div>
 
     <div class="panel" id="stats-panel">
@@ -585,6 +603,7 @@
         <span class="session-note" id="session-note"></span>
       </div>
       <div id="stats-body" class="resizable"><div class="empty-note">no fills yet</div></div>
+      <div class="v-resize-handle" data-target="stats-body" title="Drag to resize"></div>
     </div>
 
     <!-- Reads directly under Performance on purpose: that panel answers
@@ -594,6 +613,7 @@
     <div class="panel" id="markout-panel">
       <h2><span>Markout <span class="window-note" id="markout-note">—</span></span><button class="panel-toggle" data-panel="markout-panel">hide</button></h2>
       <div id="markout-body" class="resizable"><div class="empty-note">no markout data</div></div>
+      <div class="v-resize-handle" data-target="markout-body" title="Drag to resize"></div>
     </div>
 
     <div class="panel" id="nav-panel">
@@ -605,6 +625,7 @@
       <div class="mini-chart-block">
         <div class="mini-chart-label"><span>account equity</span><span class="val" id="nav-val">—</span></div>
         <div class="mini-chart resizable" id="nav-chart"></div>
+        <div class="v-resize-handle" data-target="nav-chart" title="Drag to resize"></div>
       </div>
       <div class="empty-note" id="nav-empty">account margin unavailable</div>
     </div>

@@ -1358,20 +1358,50 @@ window.addEventListener("resize", () => {
   if (!Number.isNaN(current)) setRailWidth(current, false);
 });
 
-// --- Per-panel height resize persistence ---
-// The height itself is native CSS `resize: vertical` (see .resizable in
-// index.html) — the browser already gives every element with that class a
-// drag corner, no pointer-capture code needed. This just remembers what the
-// user dragged it to, the same "deliberate layout choice survives a
-// reload" contract as the two column handles above.
+// --- Per-panel height resize ---
+// First cut used native CSS `resize: vertical` on the body divs. Dropped:
+// its grab corner is a tiny, near-invisible triangle against this
+// dashboard's near-black panels — a working feature that read as broken.
+// Same mechanism as the two column handles above instead: a real,
+// full-width `.v-resize-handle` bar (see index.html) with its own
+// pointer-capture drag, one per resizable block, persisted per element id.
 const RESIZE_KEY_PREFIX = "dashboard.resizeH.";
-document.querySelectorAll(".resizable[id]").forEach((el) => {
-  const key = RESIZE_KEY_PREFIX + el.id;
-  const stored = localStorage.getItem(key);
-  if (stored) el.style.height = stored;
-  new ResizeObserver((entries) => {
-    localStorage.setItem(key, `${Math.round(entries[0].contentRect.height)}px`);
-  }).observe(el);
+const V_RESIZE_MIN = 40;
+document.querySelectorAll(".v-resize-handle[data-target]").forEach((handle) => {
+  const target = document.getElementById(handle.dataset.target);
+  if (!target) return;
+  const key = RESIZE_KEY_PREFIX + target.id;
+  const stored = parseFloat(localStorage.getItem(key));
+  if (!Number.isNaN(stored)) target.style.height = `${stored}px`;
+
+  let dragging = false;
+  let startY = 0;
+  let startH = 0;
+  handle.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    handle.classList.add("dragging");
+    handle.setPointerCapture(e.pointerId);
+    startY = e.clientY;
+    startH = target.getBoundingClientRect().height;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    e.preventDefault();
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    target.style.height = `${Math.max(V_RESIZE_MIN, startH + (e.clientY - startY))}px`;
+  });
+  function endVResize(e) {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove("dragging");
+    if (e && handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    localStorage.setItem(key, String(Math.round(target.getBoundingClientRect().height)));
+  }
+  handle.addEventListener("pointerup", endVResize);
+  handle.addEventListener("pointercancel", endVResize);
 });
 
 // --- Freshness tracking ---
