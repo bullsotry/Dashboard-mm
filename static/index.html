@@ -135,6 +135,13 @@
   }
   .panel h2 button:hover { border-color: var(--btn-border-active); color: var(--text); }
 
+  /* Collapse any panel to just its title bar, same affordance the order
+     book already had (hide/show). Generic on purpose: hiding everything
+     but the h2 needs no per-panel markup, so new panels get this for free.
+     The window-note / age text some h2s carry stays visible collapsed —
+     it's the one thing worth reading without expanding again. */
+  .panel.collapsed > *:not(h2) { display: none; }
+
   /* Same negative-margin trick: the timeframe row *is* the chart module's title bar,
      rather than adding a redundant "CHART" strip. */
   .timeframe-bar {
@@ -464,7 +471,7 @@
     </div>
 
     <div class="panel" id="curve-panel">
-      <h2>Curve, Delta &amp; Volume</h2>
+      <h2><span>Curve, Delta &amp; Volume</span><button class="panel-toggle" data-panel="curve-panel">hide</button></h2>
       <div id="curve-panel-grid">
         <div class="mini-chart-block">
           <div class="mini-chart-label">
@@ -517,27 +524,27 @@
 
   <div id="side">
     <div class="panel" id="bots-panel">
-      <h2>Bots <span class="window-note" id="bots-count">—</span></h2>
+      <h2><span>Bots <span class="window-note" id="bots-count">—</span></span><button class="panel-toggle" data-panel="bots-panel">hide</button></h2>
       <div id="bots-body"><div class="empty-note">scanning…</div></div>
     </div>
 
     <div class="panel" id="basis-panel">
-      <h2>Basis</h2>
+      <h2><span>Basis</span><button class="panel-toggle" data-panel="basis-panel">hide</button></h2>
       <div id="basis-body"><div class="empty-note">need 2 legs on different venues</div></div>
     </div>
 
     <div class="panel" id="incidents-panel">
-      <h2>Incidents</h2>
+      <h2><span>Incidents</span><button class="panel-toggle" data-panel="incidents-panel">hide</button></h2>
       <div id="incidents-body"><div class="empty-note">no transitions observed yet</div></div>
     </div>
 
     <div class="panel" id="position-panel">
-      <h2>Position &amp; Margin</h2>
+      <h2><span>Position &amp; Margin</span><button class="panel-toggle" data-panel="position-panel">hide</button></h2>
       <div id="position-body"><div class="row"><span class="label">loading…</span></div></div>
     </div>
 
     <div class="panel" id="stats-panel">
-      <h2>Performance <span class="window-note" id="stats-window">—</span></h2>
+      <h2><span>Performance <span class="window-note" id="stats-window">—</span></span><button class="panel-toggle" data-panel="stats-panel">hide</button></h2>
       <!-- Which run these figures cover. A performance figure with no
            stated window is not a measurement, and "the last 2000 fills"
            was a window that moved under the reader's feet and spliced
@@ -554,7 +561,7 @@
          spread captured at the moment of the fill means nothing if the mid
          walks away in the 30s that follow. -->
     <div class="panel" id="markout-panel">
-      <h2>Markout <span class="window-note" id="markout-note">—</span></h2>
+      <h2><span>Markout <span class="window-note" id="markout-note">—</span></span><button class="panel-toggle" data-panel="markout-panel">hide</button></h2>
       <div id="markout-body"><div class="empty-note">no markout data</div></div>
     </div>
 
@@ -563,7 +570,7 @@
            series exists only for as long as someone has been watching, and
            the header says how much of it there is rather than letting the
            axis imply a session. -->
-      <h2>NAV <span class="window-note" id="nav-window">—</span></h2>
+      <h2><span>NAV <span class="window-note" id="nav-window">—</span></span><button class="panel-toggle" data-panel="nav-panel">hide</button></h2>
       <div class="mini-chart-block">
         <div class="mini-chart-label"><span>account equity</span><span class="val" id="nav-val">—</span></div>
         <div class="mini-chart" id="nav-chart"></div>

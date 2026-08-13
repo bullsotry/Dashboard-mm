@@ -1181,6 +1181,31 @@ bookToggle.addEventListener("click", () => {
   renderBook(bookVisible ? lastOrderbook : null, lastQuotes); // don't wait for next poll tick
 });
 
+// --- Generic panel collapse ---
+// Same hide/show affordance as the order book above, generalised: any
+// `.panel` can shrink to just its title bar via `<button class="panel-toggle"
+// data-panel="...">` in its h2 (see index.html) and CSS's
+// `.panel.collapsed > *:not(h2)`. The order book keeps its own listener
+// above instead of this one, since hiding it also has to blank the book
+// render (see renderBook call above) rather than just toggling a class.
+// State is per panel, keyed by id, so a layout choice survives a reload.
+const COLLAPSE_KEY_PREFIX = "dashboard.collapsed.";
+document.querySelectorAll("button.panel-toggle[data-panel]").forEach((btn) => {
+  const panelId = btn.dataset.panel;
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+  const setCollapsed = (collapsed) => {
+    panel.classList.toggle("collapsed", collapsed);
+    btn.textContent = collapsed ? "show" : "hide";
+  };
+  setCollapsed(localStorage.getItem(COLLAPSE_KEY_PREFIX + panelId) === "1");
+  btn.addEventListener("click", () => {
+    const collapsed = !panel.classList.contains("collapsed");
+    setCollapsed(collapsed);
+    localStorage.setItem(COLLAPSE_KEY_PREFIX + panelId, collapsed ? "1" : "0");
+  });
+});
+
 // --- Order book column resize ---
 // Only the chart column is `1fr` in #layout's grid-template-columns; the
 // handle, book and rail are all fixed/explicit widths. That means the
