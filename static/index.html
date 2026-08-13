@@ -117,24 +117,24 @@
      since a panel is height:auto the whole panel shrinks or grows with it.
      Content that no longer fits scrolls inside the body.
 
-     The type follows, but only faintly — `--pz` moves by a fraction of the
-     box's change (see TEXT_RESPONSE in app.js). Making a panel small must
-     not make it unreadable: the point of shrinking a panel you are not
-     watching is to buy space for one you are, and 8px rows serve nobody.
-     So every text size is `calc(<base>px * var(--pz))` with --pz kept in a
-     narrow band around 1, while the box itself is free to move a lot.
+     The type does not follow. Nothing here is ever scaled: no `zoom`, no
+     `transform: scale()`, and no `--pz` multiplier on font-size either —
+     that multiplier was the previous cut and it is what made the numbers
+     look soft, because `12px * 1.4375` rasterises glyphs at 17.25px and
+     lands them on fractional baselines. A native panel only reflows when
+     you resize it, so this one does too: font sizes stay at the integer
+     px they are authored at, a bigger panel shows more rows rather than
+     bigger rows, and overflow scrolls.
 
-     Deliberately NOT CSS `zoom` or `transform: scale()`, which would have
-     been one line: the mini-charts and the order book draw into a canvas
-     (lightweight-charts, plus price_tags.js's own custom primitive doing
-     hit-testing in pixel coordinates). Scaling their container blurs the
-     canvas and desynchronises those coordinates from the pointer. Sizing
-     the box and leaving the canvas to re-render at its true resolution
-     (its ResizeObserver already does) keeps both sharp. */
-  .panel { --pz: 1; }
+     The same rule is what keeps the canvases sharp — the mini-charts and
+     the order book draw into one (lightweight-charts, plus price_tags.js's
+     own primitive hit-testing in pixel coordinates). Scaling their
+     container would blur the bitmap and desynchronise those coordinates
+     from the pointer; sizing the box and letting the canvas re-render at
+     its true resolution (its ResizeObserver already does) does not. */
   .panel-ctl { display: flex; align-items: center; gap: 3px; }
 
-  /* The grip: drag it down to enlarge this panel's contents, up to shrink,
+  /* The grip: drag it down to make this panel taller, up to make it shorter,
      double-click to reset. Appended to every panel by app.js rather than
      written into the markup nine times. Spans the panel edge-to-edge via
      negative margins matched to the panel padding — the same trick the
@@ -175,7 +175,7 @@
   }
   .panel h2 {
     font-family: var(--title-family);
-    font-size: calc(var(--title-size) * var(--pz));
+    font-size: var(--title-size);
     font-weight: var(--title-weight);
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -324,7 +324,7 @@
      never show. A gap that only ever grows means the two legs are drifting
      apart, not just noisily different — the sparkline is what tells "always
      been this way" apart from "just started moving". */
-  .basis-row .val { display: flex; align-items: center; gap: 6px; font-size: calc(12px * var(--pz)); }
+  .basis-row .val { display: flex; align-items: center; gap: 6px; font-size: 12px; }
   .basis-spark { color: inherit; vertical-align: middle; flex: 0 0 auto; }
   .basis-row .val small { font-weight: 400; color: var(--text-faint); }
 
@@ -333,16 +333,16 @@
     flex: 1 1 auto; min-width: 0;
     background: var(--panel-bg); color: var(--text);
     border: 1px solid var(--panel-border); border-radius: 4px;
-    font: inherit; font-size: calc(11px * var(--pz)); padding: 2px 4px;
+    font: inherit; font-size: 11px; padding: 2px 4px;
   }
-  .session-note { font-size: calc(10px * var(--pz)); color: var(--text-faint); white-space: nowrap; }
+  .session-note { font-size: 10px; color: var(--text-faint); white-space: nowrap; }
 
   /* A markout profile is read left-to-right as time since the fill, so the
      rows are horizons and the bar diverges from a centre line at zero:
      right of centre is edge kept, left is edge given back. Colour alone
      would not survive a glance, the side of the axis does. */
-  .mo-row { display: flex; align-items: center; gap: 6px; font-size: calc(11px * var(--pz)); padding: 1px 0; }
-  .mo-row .h { width: calc(34px * var(--pz)); color: var(--text-dim); font-family: var(--title-family); }
+  .mo-row { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 1px 0; }
+  .mo-row .h { width: 34px; color: var(--text-dim); font-family: var(--title-family); }
   .mo-track {
     position: relative; flex: 1 1 auto; height: 9px;
     background: linear-gradient(var(--divider), var(--divider)) center / 1px 100% no-repeat;
@@ -350,13 +350,13 @@
   .mo-bar { position: absolute; top: 1px; height: 7px; }
   .mo-bar.pos { background: var(--bull); left: 50%; }
   .mo-bar.neg { background: var(--bear); right: 50%; }
-  .mo-val { width: calc(52px * var(--pz)); text-align: right; font-variant-numeric: tabular-nums; }
-  .mo-sides { font-size: calc(9.5px * var(--pz)); color: var(--text-faint); width: calc(86px * var(--pz)); text-align: right; }
-  .mo-legend { font-size: calc(9.5px * var(--pz)); color: var(--text-faint); margin-top: 4px; line-height: 1.35; }
+  .mo-val { width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+  .mo-sides { font-size: 9.5px; color: var(--text-faint); width: 86px; text-align: right; }
+  .mo-legend { font-size: 9.5px; color: var(--text-faint); margin-top: 4px; line-height: 1.35; }
   /* Deliberately quieter than .pnl-blocked: that one refuses a number, this
      one merely declines to vouch for it. */
   .pnl-unverified {
-    font-size: calc(10px * var(--pz)); color: var(--text-faint); font-style: italic;
+    font-size: 10px; color: var(--text-faint); font-style: italic;
     margin-top: 3px; line-height: 1.3;
   }
   /* A leg too old to price is listed, not hidden: it reads as an absence,
@@ -368,18 +368,18 @@
      a halt that happens while nobody is watching still shows up here —
      the whole reason this exists instead of just the live/warn/dead dot. */
   #incidents-body { max-height: 160px; overflow-y: auto; }
-  .incident-row { font-size: calc(10.5px * var(--pz)); padding: 2px 0; }
+  .incident-row { font-size: 10.5px; padding: 2px 0; }
   .incident-row .label { font-family: ui-monospace, Menlo, monospace; }
   .incident-row .val { font-weight: 600; }
   .incident-row .val small { font-weight: 400; color: var(--text-faint); margin-left: 4px; }
 
-  .row { display: flex; justify-content: space-between; align-items: baseline; font-size: calc(12px * var(--pz)); padding: 1.5px 0; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; padding: 1.5px 0; }
   .row .label { color: var(--text-dim); }
   .row .val { font-family: ui-monospace, Menlo, monospace; color: var(--text); }
   .pos-group { padding: 3px 0; }
   .pos-group + .pos-group { border-top: 1px solid var(--divider); margin-top: 4px; }
   .pos-side-label {
-    font-size: calc(10px * var(--pz)); font-weight: 700; letter-spacing: 0.06em;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
     padding: 0 5px; border-radius: var(--btn-radius); display: inline-block; margin-bottom: 2px;
   }
   .pos-side-label.long { color: var(--bull); background: rgba(14, 203, 129, 0.14); }
@@ -387,13 +387,13 @@
   .pnl-pos { color: var(--bull); }
   .pnl-neg { color: var(--bear); }
   .account-block { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--divider); }
-  .empty-note { color: var(--text-faint); font-size: calc(12px * var(--pz)); font-style: italic; }
+  .empty-note { color: var(--text-faint); font-size: 12px; font-style: italic; }
 
   /* Every figure in the stats panel is computed over a bounded fills
      window, so the panel states that window in its own header rather than
      letting the reader assume "today". */
   .window-note {
-    font-size: calc(10px * var(--pz)); color: var(--text-faint); text-transform: none;
+    font-size: 10px; color: var(--text-faint); text-transform: none;
     letter-spacing: 0; font-weight: 400;
   }
   /* Bot list. Discovered bots are always listed, running or not — a bot
@@ -405,7 +405,7 @@
   .bot-row {
     display: flex; flex-direction: column; gap: 2px;
     padding: 4px 6px; margin: 0 -6px;
-    cursor: pointer; font-size: calc(12px * var(--pz));
+    cursor: pointer; font-size: 12px;
     border-left: 2px solid transparent;
   }
   .bot-row:hover { background: var(--btn-bg-active); }
@@ -417,13 +417,13 @@
   .bot-row.dead .dot { background: var(--bear); }
   .bot-row .name { flex: 1 1 auto; font-family: ui-monospace, Menlo, monospace; }
   .bot-row.dead .name { color: var(--text-faint); }
-  .bot-row .age { font-size: calc(10.5px * var(--pz)); color: var(--text-faint); font-family: ui-monospace, Menlo, monospace; }
-  .bot-row .nochart { font-size: calc(9.5px * var(--pz)); color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+  .bot-row .age { font-size: 10.5px; color: var(--text-faint); font-family: ui-monospace, Menlo, monospace; }
+  .bot-row .nochart { font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
   .bot-row .bottom-line {
     display: flex; align-items: center; gap: 6px; padding-left: 14px;
-    font-family: ui-monospace, Menlo, monospace; font-size: calc(10.5px * var(--pz));
+    font-family: ui-monospace, Menlo, monospace; font-size: 10.5px;
   }
-  .bot-row .bottom-line .pos-side-label { font-size: calc(9px * var(--pz)); padding: 0 4px; margin-bottom: 0; }
+  .bot-row .bottom-line .pos-side-label { font-size: 9px; padding: 0 4px; margin-bottom: 0; }
   /* :not() keeps this from outranking .pnl-pos/.pnl-neg, which need to win
      here exactly as they do everywhere else in the rail. */
   .bot-row .bottom-line .val:not(.pnl-pos):not(.pnl-neg) { color: var(--text-dim); }
@@ -432,12 +432,12 @@
   /* Shown instead of a realised PnL that cannot be defended. Deliberately
      carries no number: a greyed-out figure is still a figure to be read. */
   .pnl-blocked-title {
-    font-family: var(--title-family); font-size: calc(10.5px * var(--pz)); font-weight: 700;
+    font-family: var(--title-family); font-size: 10.5px; font-weight: 700;
     text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent);
   }
-  .pnl-blocked-why { font-size: calc(11px * var(--pz)); color: var(--text-faint); line-height: 1.4; margin-top: 3px; }
-  .stat-net .val { font-size: calc(14px * var(--pz)); font-weight: 700; }
-  .row .val small { color: var(--text-faint); font-size: calc(10.5px * var(--pz)); margin-left: 4px; }
+  .pnl-blocked-why { font-size: 11px; color: var(--text-faint); line-height: 1.4; margin-top: 3px; }
+  .stat-net .val { font-size: 14px; font-weight: 700; }
+  .row .val small { color: var(--text-faint); font-size: 10.5px; margin-left: 4px; }
 
   /* Order book has its own wide column now (see #layout), not a cramped
      250px rail slot — bigger rows and more depth actually make use of the
@@ -454,15 +454,15 @@
   }
   .imb-fill-bid { height: 100%; background: var(--bull); }
   .imb-label {
-    font-family: ui-monospace, Menlo, monospace; font-size: calc(10.5px * var(--pz));
+    font-family: ui-monospace, Menlo, monospace; font-size: 10.5px;
     color: var(--text-dim); white-space: nowrap; flex: 0 0 auto;
   }
   .book-header {
     display: flex; justify-content: space-between;
-    font-size: calc(11px * var(--pz)); color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
+    font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
     padding: 0 6px 4px;
   }
-  .book-side { font-family: ui-monospace, Menlo, monospace; font-size: calc(14px * var(--pz)); flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+  .book-side { font-family: ui-monospace, Menlo, monospace; font-size: 14px; flex: 1 1 auto; overflow-y: auto; min-height: 0; }
   .book-row {
     position: relative;
     display: flex; justify-content: space-between;
@@ -486,12 +486,12 @@
      still where the bot is waiting — so it gets a one-line mention instead
      of silently vanishing past the depth cutoff. */
   .own-off-depth {
-    font-size: calc(11px * var(--pz)); color: var(--accent); font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px; color: var(--accent); font-family: ui-monospace, Menlo, monospace;
     padding: 2px 6px;
   }
   .own-off-depth:empty { display: none; }
   .spread-line {
-    text-align: center; font-size: calc(12px * var(--pz)); color: var(--text-dim);
+    text-align: center; font-size: 12px; color: var(--text-dim);
     padding: 5px 0; border-top: 1px solid var(--divider); border-bottom: 1px solid var(--divider);
     margin: 4px 0 6px 0;
   }
@@ -504,15 +504,15 @@
   #nav-panel .mini-chart-block + .mini-chart-block { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--divider); }
   .mini-chart-label {
     display: flex; justify-content: space-between; align-items: baseline;
-    font-size: calc(9.5px * var(--pz)); color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
+    font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em;
     margin-bottom: 2px;
   }
-  .mini-chart-label .val { font-size: calc(11px * var(--pz)); font-family: ui-monospace, Menlo, monospace; text-transform: none; letter-spacing: 0; }
+  .mini-chart-label .val { font-size: 11px; font-family: ui-monospace, Menlo, monospace; text-transform: none; letter-spacing: 0; }
   /* Two figures sharing one header row (e.g. realised pnl + its max
      drawdown) — the primary number stays full-size, the sub-figure is
      dimmed and smaller so it reads as context, not a second headline. */
   .mini-chart-vals { display: flex; align-items: baseline; gap: 6px; }
-  .mini-chart-vals .val-sub { font-size: calc(9.5px * var(--pz)); color: var(--text-faint); }
+  .mini-chart-vals .val-sub { font-size: 9.5px; color: var(--text-faint); }
   .mini-chart { height: 60px; }
 
   /* Below ~900px the fixed 300px rail leaves the chart unusably narrow, so

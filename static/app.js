@@ -1272,17 +1272,25 @@ if (!Number.isNaN(savedBookWidth)) setBookWidth(savedBookWidth, false);
 // the cursor has left its bounds — the standard fix for "drag stops working
 // if you move too fast", which is exactly the failure mode a 10px handle
 // invites.
+//
+// Capture is not on its own enough to end a gesture, though: it is dropped
+// without a pointerup if the browser loses the pointer (released outside
+// the page, focus stolen mid-drag). Every drag below therefore also ends
+// on `e.buttons === 0` in the move handler, on `lostpointercapture`, and
+// on a window-level up — otherwise the "still dragging" flag survives the
+// gesture and the next mere *hover* over the handle resizes the layout.
 let resizingBook = false;
 resizeHandle.addEventListener("pointerdown", (e) => {
-  resizingBook = true;
   resizeHandle.classList.add("dragging");
-  resizeHandle.setPointerCapture(e.pointerId);
+  try { resizeHandle.setPointerCapture(e.pointerId); } catch (_) { /* window backstop covers it */ }
+  resizingBook = true;
   document.body.style.cursor = "col-resize";
   document.body.style.userSelect = "none"; // dragging shouldn't select chart labels/text
   e.preventDefault();
 });
 resizeHandle.addEventListener("pointermove", (e) => {
   if (!resizingBook) return;
+  if (e.buttons === 0) { endBookResize(e); return; }
   // Book width = distance from the cursor to the rail's fixed left edge,
   // read fresh every move rather than assumed constant, so a window resize
   // mid-drag can't leave this stale.
@@ -1293,7 +1301,9 @@ function endBookResize(e) {
   if (!resizingBook) return;
   resizingBook = false;
   resizeHandle.classList.remove("dragging");
-  if (e && resizeHandle.hasPointerCapture(e.pointerId)) resizeHandle.releasePointerCapture(e.pointerId);
+  if (e && e.pointerId !== undefined && resizeHandle.hasPointerCapture(e.pointerId)) {
+    resizeHandle.releasePointerCapture(e.pointerId);
+  }
   document.body.style.cursor = "";
   document.body.style.userSelect = "";
   // Persisted only once the drag settles, not on every pixel of movement.
@@ -1302,6 +1312,10 @@ function endBookResize(e) {
 }
 resizeHandle.addEventListener("pointerup", endBookResize);
 resizeHandle.addEventListener("pointercancel", endBookResize);
+resizeHandle.addEventListener("lostpointercapture", endBookResize);
+window.addEventListener("pointerup", endBookResize);
+window.addEventListener("pointercancel", endBookResize);
+window.addEventListener("blur", () => endBookResize(null));
 // A saved width from a wider window can overflow a narrower one on reload;
 // re-clamp against whatever viewport actually loaded this time.
 window.addEventListener("resize", () => {
@@ -1322,15 +1336,16 @@ if (!Number.isNaN(savedRailWidth)) setRailWidth(savedRailWidth, false);
 
 let resizingRail = false;
 railResizeHandle.addEventListener("pointerdown", (e) => {
-  resizingRail = true;
   railResizeHandle.classList.add("dragging");
-  railResizeHandle.setPointerCapture(e.pointerId);
+  try { railResizeHandle.setPointerCapture(e.pointerId); } catch (_) { /* window backstop covers it */ }
+  resizingRail = true;
   document.body.style.cursor = "col-resize";
   document.body.style.userSelect = "none";
   e.preventDefault();
 });
 railResizeHandle.addEventListener("pointermove", (e) => {
   if (!resizingRail) return;
+  if (e.buttons === 0) { endRailResize(e); return; }
   // Rail width = distance from the cursor to #layout's fixed right inner
   // edge, mirroring the book handle's left-edge measurement.
   const layoutRect = layoutEl.getBoundingClientRect();
@@ -1341,7 +1356,9 @@ function endRailResize(e) {
   if (!resizingRail) return;
   resizingRail = false;
   railResizeHandle.classList.remove("dragging");
-  if (e && railResizeHandle.hasPointerCapture(e.pointerId)) railResizeHandle.releasePointerCapture(e.pointerId);
+  if (e && e.pointerId !== undefined && railResizeHandle.hasPointerCapture(e.pointerId)) {
+    railResizeHandle.releasePointerCapture(e.pointerId);
+  }
   document.body.style.cursor = "";
   document.body.style.userSelect = "";
   const current = getComputedStyle(layoutEl).getPropertyValue("--rail-w");
@@ -1349,6 +1366,10 @@ function endRailResize(e) {
 }
 railResizeHandle.addEventListener("pointerup", endRailResize);
 railResizeHandle.addEventListener("pointercancel", endRailResize);
+railResizeHandle.addEventListener("lostpointercapture", endRailResize);
+window.addEventListener("pointerup", endRailResize);
+window.addEventListener("pointercancel", endRailResize);
+window.addEventListener("blur", () => endRailResize(null));
 window.addEventListener("resize", () => {
   const current = parseFloat(getComputedStyle(layoutEl).getPropertyValue("--rail-w"));
   if (!Number.isNaN(current)) setRailWidth(current, false);
@@ -1361,17 +1382,15 @@ window.addEventListener("resize", () => {
 // it. Content that stops fitting scrolls inside the body. Double-click
 // resets to the natural size.
 //
-// The type follows only faintly. An earlier cut scaled the text and let
-// the box follow, which is backwards: shrinking a panel is how you buy
-// screen space for the panel you *are* watching, and it is worthless if
-// the one you shrank becomes unreadable. So the box moves freely while
-// --pz stays in a narrow band around 1.
+// The type does NOT follow. Two earlier cuts scaled the text with the box
+// — first with transform, then with a `--pz` multiplier on every
+// font-size — and both read as blurry: a font-size of `12px * 1.4375`
+// rasterises glyphs at 17.25px and lands them on fractional positions,
+// which is exactly the softness a native panel (Bitunix, a terminal) never
+// has because resizing a pane there only ever reflows. So the box moves
+// freely and the type stays at the integer px it was authored at; a bigger
+// panel shows more rows, not bigger rows.
 const SIZE_KEY_PREFIX = "dashboard.panelSize.";
-// Fraction of the box's proportional change that reaches the type: halve
-// the box and the text loses ~12%, double it and the text gains ~25%.
-const TEXT_RESPONSE = 0.25;
-const PZ_MIN = 0.9;
-const PZ_MAX = 1.6;
 const MIN_BODY_H = 26;
 // The main chart pane is excluded: it already sizes itself against the
 // viewport and its candles are a canvas, not type. #curve-panel, nested
@@ -1395,8 +1414,6 @@ const PANEL_BODIES = {
   "book-pane": ["book-panel"],
 };
 
-const clampPz = (z) => Math.min(Math.max(z, PZ_MIN), PZ_MAX);
-
 document.querySelectorAll(".panel[id]").forEach((panel) => {
   if (SIZE_EXCLUDE.has(panel.id)) return;
   const bodies = (PANEL_BODIES[panel.id] || [])
@@ -1418,30 +1435,17 @@ document.querySelectorAll(".panel[id]").forEach((panel) => {
     if (!isChart(el)) el.style.overflowY = "auto";
   });
 
-  // Height with nothing imposed, measured on the element that leads the
-  // group. Read once per gesture rather than continuously: --pz changes
-  // the natural height, so measuring mid-drag would feed the drag back
-  // into itself and make the panel run away from the cursor.
-  function naturalHeight() {
-    const el = bodies[0];
-    const prevH = el.style.height;
-    const prevMax = el.style.maxHeight;
-    el.style.height = "auto";
-    el.style.maxHeight = "none";
-    const h = el.getBoundingClientRect().height;
-    el.style.height = prevH;
-    el.style.maxHeight = prevMax;
-    return Math.max(h, MIN_BODY_H);
-  }
-
-  function applySize(h, natural) {
+  // Whole pixels only. A body left at 217.5px puts every row inside it on
+  // a half-pixel boundary, which is the other way to make crisp type look
+  // soft even though nothing is being scaled.
+  function applySize(h) {
+    const px = Math.round(h);
     bodies.forEach((el) => {
-      el.style.height = `${h}px`;
+      el.style.height = `${px}px`;
       // #incidents-body ships a max-height; an explicit height must win
       // over it or the panel would refuse to grow past that cap.
       el.style.maxHeight = "none";
     });
-    panel.style.setProperty("--pz", String(clampPz(1 + (h / natural - 1) * TEXT_RESPONSE)));
   }
 
   function resetSize() {
@@ -1449,35 +1453,30 @@ document.querySelectorAll(".panel[id]").forEach((panel) => {
       el.style.height = "";
       el.style.maxHeight = "";
     });
+    // Old saved layouts carried a `pz` and set this custom property; clear
+    // it on reset so a profile written by the previous build can't leave a
+    // stale multiplier behind.
     panel.style.removeProperty("--pz");
     localStorage.removeItem(SIZE_KEY_PREFIX + panel.id);
   }
 
   const key = SIZE_KEY_PREFIX + panel.id;
   const saved = JSON.parse(localStorage.getItem(key) || "null");
-  if (saved && saved.h > 0) {
-    // --pz is restored from storage, not recomputed: at load the panel
-    // still says "scanning…", so its natural height is nothing like what
-    // it will be once data arrives, and a recomputed ratio would spike.
-    bodies.forEach((el) => {
-      el.style.height = `${saved.h}px`;
-      el.style.maxHeight = "none";
-    });
-    panel.style.setProperty("--pz", String(clampPz(saved.pz || 1)));
-  }
+  if (saved && saved.h > 0) applySize(saved.h);
 
   let dragging = false;
   let startY = 0;
   let startH = 0;
-  let natural = 0;
 
   grip.addEventListener("pointerdown", (e) => {
-    dragging = true;
     startY = e.clientY;
     startH = bodies[0].getBoundingClientRect().height;
-    natural = naturalHeight();
     grip.classList.add("dragging");
-    grip.setPointerCapture(e.pointerId);
+    // Capture first, flag second: if the capture throws, the gesture never
+    // starts, instead of leaving `dragging` true with no capture — which
+    // is a drag that never ends.
+    try { grip.setPointerCapture(e.pointerId); } catch (_) { /* no capture: the window backstop covers it */ }
+    dragging = true;
     document.body.style.cursor = "ns-resize";
     document.body.style.userSelect = "none";
     readout.textContent = `${Math.round(startH)}px`;
@@ -1485,25 +1484,40 @@ document.querySelectorAll(".panel[id]").forEach((panel) => {
   });
   grip.addEventListener("pointermove", (e) => {
     if (!dragging) return;
-    const h = Math.max(MIN_BODY_H, startH + (e.clientY - startY));
-    applySize(h, natural);
-    readout.textContent = `${Math.round(h)}px`;
+    // No button held ⇒ this is a hover, not a drag. The button state on
+    // the move event is the authority, not our own flag: if the pointerup
+    // that should have cleared the flag went missing (released outside the
+    // window, capture lost, focus stolen), the flag lies and every later
+    // hover over the grip would resize the panel with no button down.
+    if (e.buttons === 0) { endSizeDrag(e); return; }
+    applySize(Math.max(MIN_BODY_H, startH + (e.clientY - startY)));
+    readout.textContent = bodies[0].style.height;
   });
   function endSizeDrag(e) {
     if (!dragging) return;
     dragging = false;
     grip.classList.remove("dragging");
-    if (e && grip.hasPointerCapture(e.pointerId)) grip.releasePointerCapture(e.pointerId);
+    if (e && e.pointerId !== undefined && grip.hasPointerCapture(e.pointerId)) {
+      grip.releasePointerCapture(e.pointerId);
+    }
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
     readout.textContent = "";
     localStorage.setItem(key, JSON.stringify({
       h: Math.round(bodies[0].getBoundingClientRect().height),
-      pz: parseFloat(panel.style.getPropertyValue("--pz")) || 1,
     }));
   }
   grip.addEventListener("pointerup", endSizeDrag);
   grip.addEventListener("pointercancel", endSizeDrag);
+  // Backstops. Pointer capture is supposed to guarantee the up lands here,
+  // but it is silently dropped when the element is re-rendered mid-gesture
+  // or the browser loses the pointer; `lostpointercapture` is the only
+  // event fired in that case, and a release outside the page reaches the
+  // window before it reaches anything else. endSizeDrag is idempotent.
+  grip.addEventListener("lostpointercapture", endSizeDrag);
+  window.addEventListener("pointerup", endSizeDrag);
+  window.addEventListener("pointercancel", endSizeDrag);
+  window.addEventListener("blur", () => endSizeDrag(null));
   grip.addEventListener("dblclick", resetSize);
 });
 

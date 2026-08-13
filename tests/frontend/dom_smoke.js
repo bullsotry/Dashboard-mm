@@ -117,43 +117,78 @@ window.Element.prototype.getBoundingClientRect = function () {
 const pzOf = (el) => parseFloat(el.style.getPropertyValue("--pz") || "1");
 const heightOf = (el) => parseFloat(el.style.height || "0");
 
-const drag = (dy) => {
-  const opts = (y) => ({ clientY: y, bubbles: true, cancelable: true });
-  grip.dispatchEvent(new window.MouseEvent("pointerdown", opts(500)));
-  grip.dispatchEvent(new window.MouseEvent("pointermove", opts(500 + dy)));
-  grip.dispatchEvent(new window.MouseEvent("pointerup", opts(500 + dy)));
+// `buttons` is what separates a drag from a hover, so every synthetic move
+// has to carry it — 1 while the button is held, 0 once released.
+const pev = (type, props) =>
+  new window.MouseEvent(type, { bubbles: true, cancelable: true, ...props });
+
+const drag = (dy, el = grip) => {
+  el.dispatchEvent(pev("pointerdown", { clientY: 500, buttons: 1 }));
+  el.dispatchEvent(pev("pointermove", { clientY: 500 + dy, buttons: 1 }));
+  el.dispatchEvent(pev("pointerup", { clientY: 500 + dy, buttons: 0 }));
 };
 
-// The whole point of the redesign: the BOX must move with the mouse,
-// roughly 1:1, while the type barely budges.
+// The whole point of the redesign: the BOX moves with the mouse, 1:1, and
+// the type does not move at all.
 drag(100);
 check("dragging down grows the box ~1:1 with the mouse",
       Math.abs(heightOf(body) - (NATURAL + 100)) < 2,
       `height=${heightOf(body)}px, expected ~${NATURAL + 100}px`);
-check("...and the text follows only faintly",
-      pzOf(panel) > 1.0 && pzOf(panel) < 1.3,
-      `--pz=${pzOf(panel).toFixed(3)} for a ${((NATURAL + 100) / NATURAL).toFixed(2)}x box`);
-check("the box moved much more than the type",
-      ((NATURAL + 100) / NATURAL) / pzOf(panel) > 1.5,
-      `box x${((NATURAL + 100) / NATURAL).toFixed(2)} vs type x${pzOf(panel).toFixed(2)}`);
+check("...and the type is not scaled at all",
+      panel.style.getPropertyValue("--pz") === "",
+      `--pz='${panel.style.getPropertyValue("--pz")}' (must be unset: scaling type is what looked blurry)`);
+check("the imposed height is a whole pixel",
+      Number.isInteger(heightOf(body)), `height=${heightOf(body)}px`);
 check("the drag persisted", window.localStorage.getItem("dashboard.panelSize.stats-panel") !== null,
       `stored=${window.localStorage.getItem("dashboard.panelSize.stats-panel")}`);
 
-// Shrinking: the box must be free to get genuinely small, the text must not
-// follow it down into illegibility.
-drag(-200);
-check("dragging up shrinks the box a lot", heightOf(body) < NATURAL * 0.6,
-      `height=${heightOf(body)}px from a natural ${NATURAL}px`);
-check("...but the text stays readable", pzOf(panel) >= 0.9,
-      `--pz=${pzOf(panel).toFixed(3)}`);
+// --- Bug: the drag state must not survive the gesture ---------------------
+// A hover over the grip after the drag has ended must do nothing. This is
+// the regression that made the panel keep resizing under a released mouse.
+const afterDrag = heightOf(body);
+grip.dispatchEvent(pev("pointermove", { clientY: 900, buttons: 0 }));
+grip.dispatchEvent(pev("pointermove", { clientY: 200, buttons: 0 }));
+check("hovering the grip after a drag does not resize", heightOf(body) === afterDrag,
+      `height went ${afterDrag}px → ${heightOf(body)}px with no button held`);
 
-check("the box cannot be dragged below the floor", heightOf(body) >= 26,
+// Worst case: the pointerup never reaches the grip at all (released outside
+// the window, capture silently dropped). The move handler's button check
+// and the window-level up are the two backstops; verify each on its own.
+grip.dispatchEvent(pev("pointerdown", { clientY: 500, buttons: 1 }));
+grip.dispatchEvent(pev("pointermove", { clientY: 560, buttons: 1 }));
+window.dispatchEvent(pev("pointerup", { clientY: 560, buttons: 0 }));
+const afterLostUp = heightOf(body);
+grip.dispatchEvent(pev("pointermove", { clientY: 900, buttons: 0 }));
+check("a pointerup that lands on the window still ends the drag",
+      heightOf(body) === afterLostUp,
+      `height went ${afterLostUp}px → ${heightOf(body)}px`);
+check("...and the grip drops its dragging class", !grip.classList.contains("dragging"));
+
+grip.dispatchEvent(pev("pointerdown", { clientY: 500, buttons: 1 }));
+grip.dispatchEvent(pev("pointermove", { clientY: 540, buttons: 1 }));
+const midDrag = heightOf(body);
+// No up anywhere — only a buttonless move, which is what a real hover after
+// a lost release looks like. It must end the gesture, not continue it.
+grip.dispatchEvent(pev("pointermove", { clientY: 800, buttons: 0 }));
+grip.dispatchEvent(pev("pointermove", { clientY: 300, buttons: 0 }));
+check("a buttonless move ends the drag instead of resizing",
+      heightOf(body) === midDrag,
+      `height went ${midDrag}px → ${heightOf(body)}px with no button and no pointerup`);
+
+// Shrinking: the box must be free to get genuinely small.
+const beforeShrink = heightOf(body);
+drag(-200);
+check("dragging up shrinks the box 1:1 too",
+      Math.abs(heightOf(body) - (beforeShrink - 200)) < 2,
+      `height=${beforeShrink}px → ${heightOf(body)}px, expected ~${beforeShrink - 200}px`);
+drag(-1000);
+check("the box cannot be dragged below the floor", heightOf(body) === 26,
       `height=${heightOf(body)}px`);
 
 grip.dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true }));
 check("double-click clears the imposed height", body.style.height === "",
       `height='${body.style.height}'`);
-check("double-click clears the type scale", panel.style.getPropertyValue("--pz") === "");
+check("double-click clears any legacy type scale", panel.style.getPropertyValue("--pz") === "");
 check("double-click forgets the saved size",
       window.localStorage.getItem("dashboard.panelSize.stats-panel") === null);
 
@@ -164,24 +199,39 @@ check("resizing one panel leaves the others alone",
 
 // Curve panel drives three charts from one grip.
 const curveGrip = doc.getElementById("curve-panel").querySelector(":scope > .panel-grip");
-curveGrip.dispatchEvent(new window.MouseEvent("pointerdown", { clientY: 400, bubbles: true, cancelable: true }));
-curveGrip.dispatchEvent(new window.MouseEvent("pointermove", { clientY: 460, bubbles: true, cancelable: true }));
-curveGrip.dispatchEvent(new window.MouseEvent("pointerup", { clientY: 460, bubbles: true, cancelable: true }));
+drag(60, curveGrip);
 check("one grip resizes all three Curve/Delta/Volume charts together",
       ["curve-chart", "delta-chart", "volume-curve-chart"]
         .every((id) => heightOf(doc.getElementById(id)) === NATURAL + 60),
       ["curve-chart", "delta-chart", "volume-curve-chart"]
         .map((id) => `${id}=${heightOf(doc.getElementById(id))}`).join(" "));
 
-// The two column handles must still be wired (they live above the zoom code).
+// The two column handles must still be wired (they live above the panel code).
 const layout = doc.getElementById("layout");
 const railHandle = doc.getElementById("rail-resize-handle");
-railHandle.dispatchEvent(new window.MouseEvent("pointerdown", { clientX: 900, bubbles: true, cancelable: true }));
-railHandle.dispatchEvent(new window.MouseEvent("pointermove", { clientX: 700, bubbles: true, cancelable: true }));
-railHandle.dispatchEvent(new window.MouseEvent("pointerup", { clientX: 700, bubbles: true, cancelable: true }));
+railHandle.dispatchEvent(pev("pointerdown", { clientX: 900, buttons: 1 }));
+railHandle.dispatchEvent(pev("pointermove", { clientX: 700, buttons: 1 }));
+railHandle.dispatchEvent(pev("pointerup", { clientX: 700, buttons: 0 }));
 check("rail width handle still responds",
       layout.style.getPropertyValue("--rail-w") !== "",
       `--rail-w=${layout.style.getPropertyValue("--rail-w") || "(unset)"}`);
+
+// Same phantom-hover regression on the column handles.
+const railAfter = layout.style.getPropertyValue("--rail-w");
+railHandle.dispatchEvent(pev("pointermove", { clientX: 400, buttons: 0 }));
+check("hovering the rail handle after a drag does not resize",
+      layout.style.getPropertyValue("--rail-w") === railAfter,
+      `--rail-w went ${railAfter} → ${layout.style.getPropertyValue("--rail-w")}`);
+
+const bookHandle = doc.getElementById("book-resize-handle");
+bookHandle.dispatchEvent(pev("pointerdown", { clientX: 500, buttons: 1 }));
+bookHandle.dispatchEvent(pev("pointermove", { clientX: 450, buttons: 1 }));
+window.dispatchEvent(pev("pointerup", { clientX: 450, buttons: 0 }));
+const bookAfter = layout.style.getPropertyValue("--book-w");
+bookHandle.dispatchEvent(pev("pointermove", { clientX: 100, buttons: 0 }));
+check("hovering the book handle after a lost release does not resize",
+      layout.style.getPropertyValue("--book-w") === bookAfter,
+      `--book-w went ${bookAfter} → ${layout.style.getPropertyValue("--book-w")}`);
 
 // Collapse must still work.
 const toggle = doc.querySelector('button.panel-toggle[data-panel="bots-panel"]');

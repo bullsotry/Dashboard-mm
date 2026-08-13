@@ -79,6 +79,23 @@ node tests/frontend/dom_smoke.js
 SEED_BOOK=420 node tests/frontend/dom_smoke.js     # with saved layout state
 ```
 
+Two more rules the drag controls have already broken once each:
+
+- **A drag ends on four things, not one.** `setPointerCapture` is not a
+  guarantee that a `pointerup` reaches the handle — the capture is dropped
+  silently when the release happens outside the page or the browser loses
+  the pointer, and the "still dragging" flag then survives the gesture, so
+  the next mere *hover* over the handle resizes the layout with no button
+  held. Every drag here ends on `pointerup`/`pointercancel`, on
+  `e.buttons === 0` inside the move handler, on `lostpointercapture`, and
+  on a window-level up. The end function is idempotent so all four can fire.
+- **Never scale type to fit a box.** Not `transform: scale()`, not `zoom`,
+  and not a `--pz` multiplier on `font-size` either — the last one shipped
+  and read as blurry, because `12px * 1.4375` rasterises glyphs at 17.25px
+  on fractional baselines. Resizing a panel changes the box; the content
+  reflows and scrolls at its authored size. Same rule keeps the canvases
+  sharp (they re-render via their `ResizeObserver`).
+
 `tests/test_app_js_declarations.py` guards the specific shape that caused
 it (a function declared twice at top level, hoisting over a `const` still
 in its temporal dead zone) and does run in the pytest suite.

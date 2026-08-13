@@ -14,12 +14,11 @@ performance panel and NAV. The backend is a single FastAPI route
 (`/snapshot`) that the frontend polls; everything else is a static file.
 
 Every panel has a grip along its bottom edge: drag it to resize that panel,
-double-click to reset. The drag moves the **box** 1:1 with the mouse, and
-the type follows only faintly (a 1.8× box is a 1.2× font) — shrinking a
-panel is how you buy screen space for the one you *are* watching, so it
-must not turn the shrunk one into 8px rows. Content that stops fitting
-scrolls inside the panel. The title bar also carries `hide`, collapsing the
-panel to just that bar. Both choices persist per panel in `localStorage`,
+double-click to reset. The drag moves the **box** 1:1 with the mouse and
+nothing else: the type is never scaled, so a taller panel shows more rows
+rather than bigger rows, and every glyph stays at the integer pixel size it
+was authored at. Content that stops fitting scrolls inside the panel. The
+title bar also carries `hide`, collapsing the panel to just that bar. Both choices persist per panel in `localStorage`,
 as do the two column widths (drag the dividers either side of the order
 book). The charts and the order book draw into a canvas and are left at
 their true resolution — they re-render at the new size rather than being
