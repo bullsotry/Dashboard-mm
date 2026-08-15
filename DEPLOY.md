@@ -55,6 +55,7 @@ ssh "$VPS" 'mkdir -p /root/dashboard-mm'
 tar czf - \
   server.py config.py requirements.txt \
   adapters/__init__.py adapters/base.py adapters/stats.py \
+  adapters/_locking.py \
   adapters/discovery.py adapters/bot_files.py adapters/basis.py \
   adapters/markouts.py adapters/sessions.py \
   adapters/bitunix_account.py adapters/bitunix_klines.py \
@@ -67,6 +68,8 @@ tar czf - \
   tests/test_okx_account.py tests/test_coinbase_account.py \
   tests/test_bitunix_account.py tests/test_bitunix_klines.py \
   tests/test_markouts.py tests/test_sessions.py \
+  tests/test_concurrency.py tests/test_app_js_declarations.py \
+  tests/frontend/dom_smoke.js \
   deploy/dashboard-mm.service \
 | ssh "$VPS" 'tar xzf - -C /root/dashboard-mm'
 ```
