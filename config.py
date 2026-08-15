@@ -128,6 +128,18 @@ KLINE_POLL_INTERVAL_S = float(os.environ.get("KLINE_POLL_INTERVAL_S", "20.0"))
 # the old one after this long, and a tab left open keeps its own warm.
 KLINE_WARM_TTL_S = float(os.environ.get("KLINE_WARM_TTL_S", "120.0"))
 
+# How often /stream rebuilds a snapshot to see whether anything changed.
+# 0.5s, i.e. tighter than the 750ms poll it supersedes: a build costs 10.2ms
+# of CPU (measured on the live host over 200 requests), so one open tab
+# costs ~2% of a core to trail the server by half a second instead of a full
+# poll cycle. Raise it if several tabs are ever left open on a busy VPS.
+STREAM_INTERVAL_S = float(os.environ.get("STREAM_INTERVAL_S", "0.5"))
+# How long the stream may stay silent before it says "still here". Must be
+# comfortably under the frontend's LINK_STALE_MS (12s), because with a push
+# transport silence is the normal state of a healthy link and only this
+# heartbeat distinguishes it from a dead one.
+STREAM_HEARTBEAT_S = float(os.environ.get("STREAM_HEARTBEAT_S", "3.0"))
+
 BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
 BIND_PORT = int(os.environ.get("BIND_PORT", "8091"))
 

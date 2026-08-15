@@ -1,21 +1,26 @@
 """Read-only monitoring dashboard. Never places orders, never imports the
 bot's code, never writes to anything a bot reads.
 
-Two routes: /bots lists what has been discovered, /snapshot returns the live
-state of one of them. Everything else is a static file.
+Three routes: /bots lists what has been discovered, /snapshot returns the
+live state of one of them, and /stream pushes that same state as it changes.
+Everything else is a static file.
 """
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import threading
 import time
 from collections import deque
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 import config
 from adapters.basis import compute_basis_pairs, split_stale
@@ -57,7 +62,30 @@ async def _no_cache_static(request, call_next):
 # static revalidation still works through it (conditional GET returns a real
 # 304 with an empty body, a stale ETag returns 200 gzipped) — that 304 path
 # is what keeps a redeployed app.js from being served stale by Safari.
-app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+class _GZipExceptStream(GZipMiddleware):
+    """GZip everything except the SSE stream.
+
+    GzipFile buffers: it emits nothing until it has enough input or is
+    closed. For a normal response that is invisible, because the response
+    ends. For /stream the response never ends, so an event written into the
+    compressor can sit in that buffer indefinitely — the push transport
+    would look connected and deliver nothing, which is worse than the poll
+    it replaced. SSE frames are ~2.4KB of JSON that already benefit from
+    `ksig` suppression, so skipping compression here costs little and
+    removes a whole class of "connected but silent" failure.
+
+    EventSource cannot set request headers, so the client has no way to opt
+    out of compression itself — it has to be decided here.
+    """
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and scope.get("path") == "/stream":
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
+app.add_middleware(_GZipExceptStream, minimum_size=1024, compresslevel=5)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
@@ -502,14 +530,20 @@ def _klines_sig(candles: list) -> str:
     )
 
 
-@app.get("/snapshot")
-def snapshot(
+def _build_snapshot(
     bot: str | None = None,
     interval: str = DEFAULT_INTERVAL,
     ksig: str | None = None,
     session: str | None = None,
 ) -> dict:
-    """`ksig` is the candle signature the caller already holds. Deep history
+    """Build one snapshot. Shared by the /snapshot poll and the /stream push,
+    so the two transports can never drift into showing different things —
+    every panel, reliability flag and window is decided exactly once, here.
+
+    Blocking by design (file reads, cached adapter state), so /stream calls
+    it in a threadpool rather than on the event loop.
+
+    `ksig` is the candle signature the caller already holds. Deep history
     made the candles ~82% of every response while changing at most once per
     kline poll, so an unchanged history is answered with its signature alone
     instead of thousands of identical rows."""
@@ -635,3 +669,117 @@ def snapshot(
         "basis": basis,
         "incidents": incidents,
     }
+
+
+@app.get("/snapshot")
+def snapshot(
+    bot: str | None = None,
+    interval: str = DEFAULT_INTERVAL,
+    ksig: str | None = None,
+    session: str | None = None,
+) -> dict:
+    """Pull one snapshot. Kept alongside /stream, not replaced by it: this is
+    the frontend's fallback when EventSource is unavailable or the stream
+    fails, and it is what every diagnostic curl in DEPLOY.md speaks."""
+    return _build_snapshot(bot=bot, interval=interval, ksig=ksig, session=session)
+
+
+def _payload_fingerprint(payload: dict) -> str:
+    """What "unchanged" means for /stream.
+
+    Deliberately excludes `server_ts`, which moves on every build and would
+    make every payload look new — the whole point is to not resend a screen
+    that has not changed. Everything else is included, so a change the
+    fingerprint misses is a panel that silently stops updating; that is the
+    failure to fear here, not an extra send.
+    """
+    body = {k: v for k, v in payload.items() if k != "server_ts"}
+    return hashlib.sha1(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
+
+
+@app.get("/stream")
+async def stream(
+    request: Request,
+    bot: str | None = None,
+    interval: str = DEFAULT_INTERVAL,
+    session: str | None = None,
+) -> StreamingResponse:
+    """Server-sent events: the same snapshot, pushed when it changes.
+
+    Why this exists. Measured over the real SSH tunnel, a poll costs ~240ms
+    of round trip against 8-20ms of server work, and the 1500ms interval —
+    since halved — dominated both: average staleness is half the interval
+    plus the trip. Pushing removes the interval *and* the request leg, so
+    the screen trails the server by one one-way hop instead of a full poll
+    cycle.
+
+    Two things this must not break, both of which the poll loop already got
+    right:
+
+    - The "link down" badge means *we cannot reach our own server*. With a
+      push transport, silence is the normal state of a healthy link when
+      nothing is changing, so silence can no longer mean failure. Hence the
+      heartbeat: it refreshes the client's proof the link is alive without
+      touching bot age, which must keep counting up from the bot's own last
+      write. Conflating the two is exactly the bug the badge exists to
+      prevent — everything renders, just frozen, next to a green light.
+    - Candles are ~93% of the payload, so they are sent once and then
+      suppressed by signature, the same trick `ksig` does for the poll. Here
+      the server tracks what it last sent on *this* connection rather than
+      trusting a client-supplied value, because it is the one that knows.
+
+    `_build_snapshot` blocks (file reads, FIFO replay), so it runs in a
+    threadpool — on the event loop it would stall every other connection,
+    including the poll fallback this is supposed to be an improvement over.
+    """
+
+    async def events():
+        last_fingerprint: str | None = None
+        last_klines_sig: str | None = None
+        last_send = 0.0
+        while True:
+            # Checked before the work, not after: a closed tab should stop
+            # costing this VPS CPU on its next tick, not one build later.
+            if await request.is_disconnected():
+                return
+
+            payload = await run_in_threadpool(
+                _build_snapshot, bot, interval, last_klines_sig, session
+            )
+            venue = payload.get("venue") or {}
+            # Only advance the remembered signature when the server actually
+            # sent candles. `_build_snapshot` returns klines=None to mean
+            # "unchanged, keep what you have"; recording the signature on
+            # that path would be claiming to have sent a history this
+            # connection never received.
+            if venue.get("klines") is not None:
+                last_klines_sig = venue.get("klines_sig")
+
+            fingerprint = _payload_fingerprint(payload)
+            now = time.time()
+            if fingerprint != last_fingerprint:
+                last_fingerprint = fingerprint
+                last_send = now
+                yield f"event: snapshot\ndata: {json.dumps(payload, default=str)}\n\n"
+            elif now - last_send >= config.STREAM_HEARTBEAT_S:
+                # Link is fine, screen is simply unchanged. Carries the
+                # server clock so the client can keep measuring bot
+                # staleness against the same clock that produced source_ts.
+                last_send = now
+                yield f"event: heartbeat\ndata: {json.dumps({'server_ts': now})}\n\n"
+
+            await asyncio.sleep(config.STREAM_INTERVAL_S)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            # No buffering anywhere: an SSE frame held back by a proxy or by
+            # a compression buffer defeats the entire point of pushing.
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )

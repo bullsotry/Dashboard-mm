@@ -54,8 +54,13 @@ worse than no NAV panel.
 ## Before calling anything done
 
 ```bash
+venv/bin/pip install -r requirements-dev.txt   # once: pytest + httpx
 venv/bin/python -m pytest tests/ -p no:anchorpy
 ```
+
+Test-only dependencies live in `requirements-dev.txt`, never in
+`requirements.txt` — the dashboard must not gain a runtime dependency
+because a test needed one.
 
 (`-p no:anchorpy` sidesteps a broken pytest plugin some machines have
 installed globally — harmless to always include.) Every adapter has hand-
@@ -77,7 +82,13 @@ already dragged the order-book divider:
 npm install                                        # once, brings in jsdom
 node tests/frontend/dom_smoke.js
 SEED_BOOK=420 node tests/frontend/dom_smoke.js     # with saved layout state
+STREAM=1 node tests/frontend/dom_smoke.js          # the push transport
 ```
+
+Three runs, not one, and they cannot be merged: a healthy stream stands the
+poll down on purpose, so the poll-timeout check and the stream checks need
+separate loads of the page. jsdom has no `EventSource`, which is what makes
+the default run cover the fallback for free.
 
 Two more rules the drag controls have already broken once each:
 
@@ -95,6 +106,17 @@ Two more rules the drag controls have already broken once each:
   on fractional baselines. Resizing a panel changes the box; the content
   reflows and scrolls at its authored size. Same rule keeps the canvases
   sharp (they re-render via their `ResizeObserver`).
+
+One rule for `/stream`, paid for during its own build:
+
+- **Test the route, not just the function.** The stream's unit tests drive
+  the route's async generator directly, because Starlette's `TestClient`
+  runs the whole app to completion into a `BytesIO` before returning a
+  response — `client.stream()` cannot read an endless response and simply
+  hangs. That is the right call for the logic, but it means routing is
+  never exercised: a `/stream` that is not registered at all would pass
+  every one of those tests. Finish with a real `uvicorn` and a real
+  `curl -N`, and read the frames.
 
 Two concurrency rules, both paid for once:
 

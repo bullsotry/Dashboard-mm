@@ -69,8 +69,10 @@ tar czf - \
   tests/test_bitunix_account.py tests/test_bitunix_klines.py \
   tests/test_markouts.py tests/test_sessions.py \
   tests/test_concurrency.py tests/test_app_js_declarations.py \
-  tests/frontend/dom_smoke.js \
-  deploy/dashboard-mm.service \
+  tests/test_stream.py tests/frontend/dom_smoke.js \
+  requirements-dev.txt \
+  deploy/dashboard-mm.service deploy/healthcheck.sh \
+  deploy/dashboard-mm-health.service deploy/dashboard-mm-health.timer \
 | ssh "$VPS" 'tar xzf - -C /root/dashboard-mm'
 ```
 
@@ -177,6 +179,30 @@ ssh "$VPS" '
 ```
 
 The `ss` line must show `127.0.0.1:8091`, never `0.0.0.0:8091`.
+
+## Step 5b — the health probe
+
+`Restart=on-failure` catches a process that dies. It does not catch uvicorn
+staying up while every `/snapshot` returns a 500 or a payload frozen at some
+past `server_ts` — the unit stays green and nothing says otherwise. A
+oneshot every 2 minutes checks the port answers, the body parses, and
+`server_ts` is moving; it exits non-zero otherwise, so the failure shows up
+in `systemctl --failed` with the reason in the journal.
+
+```bash
+ssh "$VPS" '
+  chmod +x /root/dashboard-mm/deploy/healthcheck.sh
+  install -m 644 /root/dashboard-mm/deploy/dashboard-mm-health.service /etc/systemd/system/
+  install -m 644 /root/dashboard-mm/deploy/dashboard-mm-health.timer  /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl start dashboard-mm-health.service   # prove it passes before arming it
+  systemctl enable --now dashboard-mm-health.timer
+  systemctl list-timers dashboard-mm-health.timer --no-pager
+'
+```
+
+It deliberately does not restart the dashboard: an observer that silently
+repairs what it observes hides the incident it exists to surface.
 
 ## Step 6 — view it
 

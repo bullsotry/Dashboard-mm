@@ -1,0 +1,8 @@
+# Test-only dependencies. Deliberately separate from requirements.txt: the
+# dashboard itself must not gain a dependency because a test needed one, and
+# a deployed host installs these only if you intend to run the suite there
+# (DEPLOY.md's "Before calling anything done" step does).
+pytest
+# Starlette's TestClient is built on httpx; /stream cannot be tested without
+# a client that can read a response incrementally.
+httpx

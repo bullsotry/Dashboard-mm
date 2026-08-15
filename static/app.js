@@ -188,6 +188,7 @@ function renderTimeframeBar(venue) {
     volumeSeries.setData([]);
     updateChartLabel();
     poll(true); // don't wait for the next tick — the click should feel instant
+    connectStream(); // the interval is part of the stream's URL
   });
 }
 
@@ -670,6 +671,7 @@ document.getElementById("bots-body").addEventListener("click", (e) => {
   currentSession = null; // session numbering is per bot
   lastSessionSig = "";
   poll(true); // supersedes any request still in flight for the old bot
+  connectStream(); // and supersedes the old bot's stream along with it
 });
 
 document.getElementById("session-select").addEventListener("change", (e) => {
@@ -678,6 +680,7 @@ document.getElementById("session-select").addEventListener("change", (e) => {
   currentSession = e.target.selectedIndex === 0 ? null : e.target.value;
   resetChartState();
   poll(true);
+  connectStream();
 });
 
 function fmtDuration(s) {
@@ -1631,6 +1634,177 @@ function renderStatus() {
   if (bookAgeEl) bookAgeEl.textContent = botAgeS === null ? "—" : `${fmtDuration(botAgeS)} old`;
 }
 
+// Everything that turns a snapshot into pixels. Extracted so the poll and
+// the stream cannot drift into rendering the same payload differently —
+// there is one path from data to screen, and both transports enter it here.
+function applySnapshot(data) {
+  renderBotList(data.bots, data.server_ts, data.bot);
+  renderBasis(data.basis || []);
+  renderIncidents(data.incidents || [], data.server_ts);
+  // The server honours the requested bot when it still exists, so a
+  // mismatch means either no choice had been made yet (first load lands on
+  // the freshest bot) or the chosen bot vanished and was substituted.
+  // Both cases want the same thing: adopt it and clear the old bot's chart.
+  if (data.bot && data.bot !== currentBotKey) {
+    currentBotKey = data.bot;
+    resetChartState();
+  }
+
+  const venue = data.venue;
+  if (venue) {
+    currentSymbol = venue.symbol || "";
+    // The tab title names whichever bot/venue is actually selected, not a
+    // fixed exchange — this dashboard watches whatever the operator is
+    // running today, not just Bitunix.
+    document.title = venue.label ? `MM Dashboard — ${venue.label}` : "MM Dashboard";
+
+    // Age is resolved *before* anything is drawn: what a bot asserts about
+    // its position, PnL and book is only worth rendering while the bot is
+    // still alive to assert it. A stopped bot's last words are not a
+    // reading of the market, they are a fossil of the moment it died.
+    if (data.server_ts && venue.source_ts) {
+      botAgeAtPollS = Math.max(0, data.server_ts - venue.source_ts);
+      botAgeMeasuredAt = Date.now();
+    } else {
+      botAgeAtPollS = null;
+    }
+    const dead = botAgeAtPollS !== null && botAgeAtPollS * 1000 > BOT_DEAD_MS;
+
+    // The book is published by the bot, so it dies with it. Dropping it
+    // here also clears the mid out of the chart label, which would
+    // otherwise keep quoting a days-old price next to a live symbol name.
+    lastOrderbook = dead ? null : venue.orderbook || null;
+    lastQuotes = dead ? [] : venue.quotes || [];
+    updatePriceDecimals(lastOrderbook);
+    renderTimeframeBar(venue);
+    updateChartLabel();
+    // Candles are venue market data, not the bot's claim, so they stay
+    // true after the bot stops and are still worth showing.
+    renderCandles(venue.klines);
+
+    // A session's realised performance outlives the bot that produced it,
+    // so it is rendered either way — see renderDeadBot.
+    renderSessionBar(venue.sessions, venue.session);
+    renderStats(venue.stats, venue.session);
+    renderCurve(venue.equity_curve);
+    renderMarkout(venue.markouts);
+
+    if (dead) {
+      renderDeadBot(botAgeAtPollS);
+    } else {
+      addFillMarkers(venue.fills || [], venue.kline_interval_s);
+      renderPriceLines(venue);
+      renderPosition(venue);
+      renderNav(venue.nav_curve);
+      renderBook(bookVisible ? lastOrderbook : null, lastQuotes);
+    }
+  } else {
+    // Nothing discovered at all. The link is healthy, so say so rather
+    // than showing the last bot's numbers next to a green badge.
+    currentBotKey = null;
+    currentSymbol = "";
+    lastOrderbook = null;
+    lastQuotes = [];
+    botAgeAtPollS = null;
+    document.title = "MM Dashboard";
+    resetChartState();
+    renderPosition({ positions: [], account: null });
+    renderStats(null);
+    renderCurve(null);
+    renderMarkout(null);
+    renderNav(null);
+    renderBook(null);
+    updateChartLabel();
+  }
+  lastGoodPollTs = Date.now();
+  everConnected = true;
+}
+
+// ── Push transport ─────────────────────────────────────────────────────────
+// The poll below still exists and still works; this sits on top of it. When
+// the stream is delivering, the interval poll stands down (see poll()); when
+// it stops for any reason — no EventSource, a proxy that buffers, a dropped
+// tunnel — the poll resumes on its own within STREAM_STALE_MS. There is no
+// state machine to get wrong: "is the stream healthy" is one comparison
+// against the clock, and being wrong about it costs a redundant poll rather
+// than a frozen screen.
+//
+// 8000ms: the server heartbeats every 3s, so two missed beats plus slack.
+// Comfortably under LINK_STALE_MS (12s), so the poll gets a chance to prove
+// the link before the badge calls it down.
+const STREAM_STALE_MS = 8000;
+let streamSource = null;
+let lastStreamFrameTs = 0;
+
+function streamHealthy() {
+  return streamSource !== null && Date.now() - lastStreamFrameTs < STREAM_STALE_MS;
+}
+
+// Called on every change of what we are looking at — bot, interval, session
+// — because those are query parameters of the connection itself, not
+// something that can be renegotiated on an open EventSource.
+function connectStream() {
+  if (typeof EventSource === "undefined") return; // poll-only, by design
+  if (streamSource) {
+    streamSource.close();
+    streamSource = null;
+  }
+  let url = `/stream?interval=${encodeURIComponent(currentInterval)}`;
+  if (currentBotKey) url += `&bot=${encodeURIComponent(currentBotKey)}`;
+  if (currentSession !== null) url += `&session=${encodeURIComponent(currentSession)}`;
+
+  let es;
+  try {
+    es = new EventSource(url);
+  } catch (err) {
+    console.warn("stream unavailable, polling instead:", err.message);
+    return;
+  }
+  streamSource = es;
+  // Grace: the connection has not had a chance to say anything yet, and
+  // counting its own setup against it would declare it stale before its
+  // first frame.
+  lastStreamFrameTs = Date.now();
+
+  es.addEventListener("snapshot", (e) => {
+    // A frame from a connection we have already replaced is the same stale-
+    // response race the poll guards with `requestedBot`: the user switched
+    // bots and this is the old bot's data arriving late. Identity of the
+    // source is the exact test — unlike a key comparison, it cannot be
+    // confused by the first-load case where the server picks the bot.
+    if (es !== streamSource) return;
+    lastStreamFrameTs = Date.now();
+    let data;
+    try {
+      data = JSON.parse(e.data);
+    } catch (err) {
+      console.warn("stream frame unparseable:", err.message);
+      return;
+    }
+    applySnapshot(data);
+    renderStatus();
+  });
+
+  es.addEventListener("heartbeat", () => {
+    if (es !== streamSource) return;
+    // The link is alive and the screen is simply unchanged. This refreshes
+    // proof-of-link ONLY. Bot age must keep counting up from the bot's own
+    // last write — a bot that stopped writing is precisely what this
+    // dashboard exists to keep saying out loud, and a heartbeat that reset
+    // it would turn a dead bot green.
+    lastStreamFrameTs = Date.now();
+    lastGoodPollTs = Date.now();
+    everConnected = true;
+    renderStatus();
+  });
+
+  es.onerror = () => {
+    // EventSource reconnects on its own. Nothing to do here but let
+    // streamHealthy() lapse, which hands the next tick back to the poll.
+    console.warn("stream error; polling covers the gap");
+  };
+}
+
 // True while a /snapshot request is outstanding. Over an SSH tunnel a
 // request can take several seconds — longer than POLL_MS — and the interval
 // fired regardless, so three or four identical requests piled up in flight
@@ -1642,6 +1816,10 @@ function renderStatus() {
 let pollInFlight = false;
 
 async function poll(force = false) {
+  // A healthy stream is already delivering this; the interval tick would
+  // only duplicate it. A forced poll still goes through — a bot switch
+  // should not wait on the stream reconnecting.
+  if (!force && streamHealthy()) return;
   if (pollInFlight && !force) return;
   pollInFlight = true;
   try {
@@ -1690,86 +1868,7 @@ async function _poll() {
     // than applied on top of it.
     if (requestedBot !== currentBotKey) return;
 
-    renderBotList(data.bots, data.server_ts, data.bot);
-    renderBasis(data.basis || []);
-    renderIncidents(data.incidents || [], data.server_ts);
-    // The server honours the requested bot when it still exists, so a
-    // mismatch means either no choice had been made yet (first load lands on
-    // the freshest bot) or the chosen bot vanished and was substituted.
-    // Both cases want the same thing: adopt it and clear the old bot's chart.
-    if (data.bot && data.bot !== currentBotKey) {
-      currentBotKey = data.bot;
-      resetChartState();
-    }
-
-    const venue = data.venue;
-    if (venue) {
-      currentSymbol = venue.symbol || "";
-      // The tab title names whichever bot/venue is actually selected, not a
-      // fixed exchange — this dashboard watches whatever the operator is
-      // running today, not just Bitunix.
-      document.title = venue.label ? `MM Dashboard — ${venue.label}` : "MM Dashboard";
-
-      // Age is resolved *before* anything is drawn: what a bot asserts about
-      // its position, PnL and book is only worth rendering while the bot is
-      // still alive to assert it. A stopped bot's last words are not a
-      // reading of the market, they are a fossil of the moment it died.
-      if (data.server_ts && venue.source_ts) {
-        botAgeAtPollS = Math.max(0, data.server_ts - venue.source_ts);
-        botAgeMeasuredAt = Date.now();
-      } else {
-        botAgeAtPollS = null;
-      }
-      const dead = botAgeAtPollS !== null && botAgeAtPollS * 1000 > BOT_DEAD_MS;
-
-      // The book is published by the bot, so it dies with it. Dropping it
-      // here also clears the mid out of the chart label, which would
-      // otherwise keep quoting a days-old price next to a live symbol name.
-      lastOrderbook = dead ? null : venue.orderbook || null;
-      lastQuotes = dead ? [] : venue.quotes || [];
-      updatePriceDecimals(lastOrderbook);
-      renderTimeframeBar(venue);
-      updateChartLabel();
-      // Candles are venue market data, not the bot's claim, so they stay
-      // true after the bot stops and are still worth showing.
-      renderCandles(venue.klines);
-
-      // A session's realised performance outlives the bot that produced it,
-      // so it is rendered either way — see renderDeadBot.
-      renderSessionBar(venue.sessions, venue.session);
-      renderStats(venue.stats, venue.session);
-      renderCurve(venue.equity_curve);
-      renderMarkout(venue.markouts);
-
-      if (dead) {
-        renderDeadBot(botAgeAtPollS);
-      } else {
-        addFillMarkers(venue.fills || [], venue.kline_interval_s);
-        renderPriceLines(venue);
-        renderPosition(venue);
-        renderNav(venue.nav_curve);
-        renderBook(bookVisible ? lastOrderbook : null, lastQuotes);
-      }
-    } else {
-      // Nothing discovered at all. The link is healthy, so say so rather
-      // than showing the last bot's numbers next to a green badge.
-      currentBotKey = null;
-      currentSymbol = "";
-      lastOrderbook = null;
-      lastQuotes = [];
-      botAgeAtPollS = null;
-      document.title = "MM Dashboard";
-      resetChartState();
-      renderPosition({ positions: [], account: null });
-      renderStats(null);
-      renderCurve(null);
-      renderMarkout(null);
-      renderNav(null);
-      renderBook(null);
-      updateChartLabel();
-    }
-    lastGoodPollTs = Date.now();
-    everConnected = true;
+    applySnapshot(data);
   } catch (err) {
     // An abort is a failed poll like any other — the badge must desaturate
     // and keep ageing, not pretend the last data is current. Named
@@ -1790,6 +1889,9 @@ setInterval(renderStatus, STATUS_TICK_MS);
 
 poll();
 setInterval(poll, POLL_MS);
+// Opened after the first poll, so the screen is painted from a plain GET
+// even on a browser or a link where the stream never works.
+connectStream();
 
 // Safari (WebKit) throttles setInterval hard in a backgrounded tab — a
 // click or a switch made just before tabbing away can sit unconfirmed for

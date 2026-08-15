@@ -10,8 +10,9 @@ directly under the chart, a Curve/Delta/Volume panel — cumulative realised
 PnL, running inventory and cumulative traded notional, each as a mini chart
 laid out side by side instead of just a single number. A side rail carries
 the bot list, cross-venue basis, incidents, order book, position & margin,
-performance panel and NAV. The backend is a single FastAPI route
-(`/snapshot`) that the frontend polls; everything else is a static file.
+performance panel and NAV. The backend is a small FastAPI app: `/snapshot`
+returns the current state, `/stream` pushes it as it changes, and everything
+else is a static file.
 
 Every panel has a grip along its bottom edge: drag it to resize that panel,
 double-click to reset. The drag moves the **box** 1:1 with the mouse and
@@ -68,6 +69,34 @@ looking at.
 Responses are gzipped (`compresslevel=5`), which matters because the whole
 thing is read over an SSH tunnel: a snapshot is a couple of hundred KB of
 JSON resent every poll.
+
+## How the screen gets its data
+
+Two transports, one of which is a fallback for the other.
+
+`/stream` is server-sent events: the server rebuilds a snapshot every
+`STREAM_INTERVAL_S` (0.5s) and pushes it only when it differs, plus a
+heartbeat every `STREAM_HEARTBEAT_S` (3s) when it does not. `/snapshot` is
+the plain poll, every `POLL_MS` (750ms), and the frontend stands it down
+while the stream is delivering — a stream that stops for any reason (no
+`EventSource`, a buffering proxy, a dropped tunnel) hands the next tick back
+to the poll within 8s, with no state machine in between.
+
+Why bother: measured over the real tunnel, the server does 8-20ms of work
+and the round trip costs ~240ms, so the poll *interval* dominated how stale
+the screen was — average staleness is half the interval plus the trip.
+Pushing removes the interval and the request leg both.
+
+Two properties this must never lose, each guarded by a test:
+
+- **A heartbeat proves the link, never the bot.** Under a push transport,
+  silence is the normal state of a healthy link, so something has to
+  distinguish it from a dead one. But bot age must keep counting from the
+  bot's own last write — a heartbeat that reset it would put a bot which
+  stopped writing hours ago behind a green "live" badge.
+- **`/stream` is exempt from gzip.** `GzipFile` buffers until it has enough
+  input or is closed, and this response never closes, so a compressed
+  stream can connect successfully and then deliver nothing at all.
 
 ## Several tabs are several threads
 
@@ -372,11 +401,21 @@ the account adapter rather than the fill replay.
 ## Tests
 
 ```bash
+venv/bin/pip install -r requirements-dev.txt   # once: pytest + httpx
 venv/bin/python -m pytest tests/ -p no:anchorpy
+
+npm install                                     # once: jsdom
+node tests/frontend/dom_smoke.js                # poll-only path
+SEED_BOOK=420 node tests/frontend/dom_smoke.js  # with saved layout state
+STREAM=1 node tests/frontend/dom_smoke.js       # push path
 ```
 
 (`-p no:anchorpy` sidesteps an unrelated broken pytest plugin some machines
 have installed globally; harmless to include even where it isn't needed.)
+
+The three frontend runs cannot be collapsed into one: a healthy stream
+deliberately stands the poll down, so the poll-timeout check and the stream
+checks need separate loads of the page.
 
 ## Running locally
 

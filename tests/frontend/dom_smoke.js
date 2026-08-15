@@ -82,6 +82,31 @@ window.LightweightCharts = {
   ColorType: { Solid: "solid" }, LineStyle: { Dashed: 2, Solid: 0 }, CrosshairMode: { Normal: 0 },
 };
 
+// jsdom has no EventSource. Absent, app.js takes its poll-only fallback —
+// which is what the default run of this file exercises. STREAM=1 installs a
+// controllable one so the push path gets covered too; the two cannot share a
+// run, because a healthy stream deliberately stands the poll down and the
+// poll-timeout check below needs the poll running.
+const STREAM = !!process.env.STREAM;
+const sources = [];
+if (STREAM) {
+  window.EventSource = class {
+    constructor(url) {
+      this.url = url;
+      this.listeners = {};
+      this.closed = false;
+      sources.push(this);
+    }
+    addEventListener(type, fn) {
+      (this.listeners[type] = this.listeners[type] || []).push(fn);
+    }
+    close() { this.closed = true; }
+    emit(type, data) {
+      for (const fn of this.listeners[type] || []) fn({ data: JSON.stringify(data) });
+    }
+  };
+}
+
 if (process.env.SEED_BOOK) window.localStorage.setItem("dashboard.bookWidthPx", process.env.SEED_BOOK);
 window.addEventListener("error", (e) => errors.push("window error: " + e.message));
 
@@ -261,11 +286,91 @@ check("collapse still works", other.classList.contains("collapsed"));
 // makes the loop resume, so a rising fetch count is the whole assertion.
 const callsBefore = fetchCalls;
 setTimeout(() => {
-  check("a hung poll times out and the loop resumes",
-        fetchCalls > callsBefore,
-        `fetch calls went ${callsBefore} → ${fetchCalls} while every request hangs`);
+  if (!STREAM) {
+    check("a hung poll times out and the loop resumes",
+          fetchCalls > callsBefore,
+          `fetch calls went ${callsBefore} → ${fetchCalls} while every request hangs`);
+  } else {
+    runStreamChecks();
+  }
 
   console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
-  // Long enough for the 40ms timeout above plus a 1500ms poll tick to fire.
+  // Long enough for the 40ms timeout above plus a 750ms poll tick to fire.
 }, 2000);
+
+// ── The push transport ─────────────────────────────────────────────────────
+// Every check here is a way the stream could look connected while lying: a
+// screen that never updates, a poll that keeps hammering anyway, a stale
+// bot's frames landing after a switch, or — the dangerous one — a heartbeat
+// resurrecting a bot that has stopped writing.
+function runStreamChecks() {
+  const snap = (ageS, equity) => {
+    const now = Date.now() / 1000;
+    return {
+      server_ts: now,
+      bot: "bitunix:SOLUSDT",
+      bots: [{ key: "bitunix:SOLUSDT", label: "bitunix · SOLUSDT", exchange: "bitunix",
+               symbol: "SOLUSDT", source_ts: now - ageS, positions: [], realised_net: 0 }],
+      basis: { pairs: [], stale: [] },
+      incidents: [],
+      venue: {
+        key: "bitunix:SOLUSDT", exchange: "bitunix", symbol: "SOLUSDT",
+        label: "bitunix · SOLUSDT", source_ts: now - ageS,
+        orderbook: { bids: [{ price: 1, size: 1 }], asks: [{ price: 2, size: 1 }], ts: now - ageS },
+        positions: [], fills: [], quotes: [], stats: null, session: null, sessions: [],
+        markouts: [], equity_curve: [], nav_curve: [],
+        account: { equity: equity }, klines: null, klines_sig: "sig",
+        kline_interval: "1m", kline_interval_s: 60, supported_intervals: ["1m"],
+      },
+    };
+  };
+
+  check("the stream was opened", sources.length > 0, `${sources.length} EventSource(s)`);
+  const es = sources[sources.length - 1];
+  check("...on /stream, carrying the selected interval",
+        es && es.url.startsWith("/stream?") && es.url.includes("interval="), es && es.url);
+
+  check("the interval poll stands down while the stream is healthy",
+        fetchCalls === callsBefore,
+        `fetch calls went ${callsBefore} → ${fetchCalls} with a live stream`);
+
+  const errsBefore = errors.length;
+  es.emit("snapshot", snap(1, 100));
+  check("a pushed snapshot renders without throwing",
+        errors.length === errsBefore, errors.slice(errsBefore).join(" | "));
+  check("...and the badge reads live off the pushed frame",
+        doc.getElementById("status-text").textContent === "live",
+        doc.getElementById("status-text").textContent);
+
+  // The one that matters most. A heartbeat proves the LINK is alive. If it
+  // also refreshed bot age, a bot that stopped writing hours ago would sit
+  // behind a green "live" badge — the exact confident lie this dashboard
+  // exists to refuse.
+  es.emit("snapshot", snap(3600, 100));
+  check("a bot that stopped writing reads dead",
+        doc.getElementById("status-text").textContent === "bot dead",
+        doc.getElementById("status-text").textContent);
+  es.emit("heartbeat", { server_ts: Date.now() / 1000 });
+  check("a heartbeat does NOT resurrect a dead bot",
+        doc.getElementById("status-text").textContent === "bot dead",
+        `badge became "${doc.getElementById("status-text").textContent}" after a heartbeat`);
+
+  // A switch closes the old connection; a frame still in flight from it is
+  // the old bot's data and must not be applied on top of the new one.
+  // The badge currently reads "bot dead". The superseded connection now
+  // pushes a perfectly healthy frame: if it were applied, the badge would
+  // flip to "live" — a dead bot made to look alive by a connection the user
+  // already navigated away from. The badge is the discriminant, because
+  // merely not throwing proves nothing.
+  const before = sources.length;
+  window.connectStream();
+  const superseded = es;
+  check("the old connection was closed on reconnect", superseded.closed === true);
+  check("...and a new one was opened", sources.length > before,
+        `${before} → ${sources.length} sources`);
+  superseded.emit("snapshot", snap(1, 999));
+  check("a frame from a superseded connection is ignored",
+        doc.getElementById("status-text").textContent === "bot dead",
+        `badge became "${doc.getElementById("status-text").textContent}" from a stale connection`);
+}
