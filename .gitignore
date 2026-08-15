@@ -27,3 +27,6 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+
+# jsdom, for tests/frontend only — see CLAUDE.md
+node_modules/

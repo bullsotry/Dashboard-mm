@@ -1,0 +1,8 @@
+{
+  "name": "dashboard-mm-tests",
+  "private": true,
+  "description": "Dev-only: jsdom for the frontend DOM smoke tests. Nothing here ships to the VPS.",
+  "devDependencies": {
+    "jsdom": "^30.0.1"
+  }
+}

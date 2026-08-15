@@ -13,6 +13,7 @@ from collections import deque
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -40,6 +41,23 @@ async def _no_cache_static(request, call_next):
         response.headers["Cache-Control"] = "no-cache"
     return response
 
+
+# Compression. /snapshot is a couple of hundred KB of JSON resent every 1.5s
+# poll, over an SSH tunnel — the single biggest thing crossing that link.
+# Measured on a fixture snapshot: 195.6KB -> 11.3KB. Treat that 17x as an
+# upper bound, not a forecast: the fixture ledger cycles through ten prices,
+# which deflate loves. The same payload shape with randomised values
+# compresses ~5x, so ~5x is the number to expect on a real bot.
+#
+# compresslevel=5, not the library default of 9: measured on that payload,
+# 9 gives 10.5KB in 7.22ms against 5's 11.3KB in 4.99ms — 7% smaller for 45%
+# more CPU, on a VPS that already shares its cores with the bots it watches.
+#
+# Registered after the no-cache middleware so it wraps it. Verified that
+# static revalidation still works through it (conditional GET returns a real
+# 304 with an empty body, a stale ETag returns 200 gzipped) — that 304 path
+# is what keeps a redeployed app.js from being served stale by Safari.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")

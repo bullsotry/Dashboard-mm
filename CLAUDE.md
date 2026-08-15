@@ -74,7 +74,7 @@ the seeded variant, because the last such bug only fired for users who had
 already dragged the order-book divider:
 
 ```bash
-npm install jsdom                                  # once
+npm install                                        # once, brings in jsdom
 node tests/frontend/dom_smoke.js
 SEED_BOOK=420 node tests/frontend/dom_smoke.js     # with saved layout state
 ```
