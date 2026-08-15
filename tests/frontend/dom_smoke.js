@@ -46,7 +46,23 @@ window.Element.prototype.setPointerCapture = function () {};
 window.Element.prototype.releasePointerCapture = function () {};
 window.Element.prototype.hasPointerCapture = function () { return false; };
 window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
-window.fetch = () => new Promise(() => {}); // never resolves: no polling noise
+// Never resolves — a tunnel that has become a black hole, which is the
+// scenario the poll timeout exists for. Counted, and honouring `signal`, so
+// the timeout check below can watch the loop recover; before that timeout
+// existed this stub would wedge the poll loop after exactly one request.
+let fetchCalls = 0;
+window.fetch = (url, opts = {}) => {
+  fetchCalls++;
+  return new Promise((_resolve, reject) => {
+    if (opts.signal) {
+      opts.signal.addEventListener("abort", () =>
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    }
+  });
+};
+// Read by app.js in place of its 4500ms default, so this test takes
+// milliseconds rather than seconds.
+window.__POLL_TIMEOUT_MS__ = 40;
 
 // Minimal lightweight-charts stand-in — the vendor bundle needs canvas.
 const stubSeries = { setData() {}, update() {}, applyOptions() {}, setMarkers() {},
@@ -238,5 +254,18 @@ const toggle = doc.querySelector('button.panel-toggle[data-panel="bots-panel"]')
 toggle.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("collapse still works", other.classList.contains("collapsed"));
 
-console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+// A hung request must not stop the poll loop. `pollInFlight` is released in
+// a finally, but with no timeout the fetch above settles neither way, so the
+// finally never runs and every later tick returns early — the page keeps
+// ageing its badge while having silently stopped asking. Only the abort
+// makes the loop resume, so a rising fetch count is the whole assertion.
+const callsBefore = fetchCalls;
+setTimeout(() => {
+  check("a hung poll times out and the loop resumes",
+        fetchCalls > callsBefore,
+        `fetch calls went ${callsBefore} → ${fetchCalls} while every request hangs`);
+
+  console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
+  process.exit(failures === 0 ? 0 : 1);
+  // Long enough for the 40ms timeout above plus a 1500ms poll tick to fire.
+}, 2000);

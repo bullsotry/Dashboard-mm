@@ -3,6 +3,24 @@
  * tunnel to 127.0.0.1 on the VPS. */
 
 const POLL_MS = 1500;
+// A poll that never comes back stops the loop dead. `pollInFlight` below is
+// released in a finally, but a fetch against a tunnel that has become a
+// black hole (no RST, just silence) settles neither way for minutes, so the
+// finally never runs and every subsequent tick returns early. The badge goes
+// on ageing correctly — which is worse, not better: the page looks like it
+// is working while it has stopped asking. Only a bot switch or a tab focus
+// (both force=true) could wake it.
+//
+// 3x POLL_MS: wide enough for the several-second round trip an SSH tunnel to
+// a loaded VPS really does take (see LINK_STALE_MS below, set for the same
+// reason), tight enough to recover inside one badge tick. AbortController
+// rather than AbortSignal.timeout() because this is read from Safari and
+// this file already carries two WebKit workarounds; the manual form works
+// everywhere.
+//
+// The window override exists so the DOM smoke test can drive this path in
+// milliseconds instead of waiting 4.5s.
+const POLL_TIMEOUT_MS = window.__POLL_TIMEOUT_MS__ || POLL_MS * 3;
 // Two independent failure modes, two independent clocks:
 //   link  — we cannot reach our own server (tunnel dropped, uvicorn died).
 //   bot   — the server answers fine, but the bot stopped writing its state.
@@ -1639,9 +1657,18 @@ async function _poll() {
     // Tell the server which history we already hold so it can answer
     // "unchanged" instead of resending thousands of identical candles.
     if (lastCandleSig) url += `&ksig=${encodeURIComponent(lastCandleSig)}`;
-    const resp = await fetch(url, { cache: "no-store" });
-    if (!resp.ok) throw new Error(`http ${resp.status}`);
-    const data = await resp.json();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), POLL_TIMEOUT_MS);
+    let data;
+    try {
+      const resp = await fetch(url, { cache: "no-store", signal: controller.signal });
+      if (!resp.ok) throw new Error(`http ${resp.status}`);
+      data = await resp.json();
+    } finally {
+      // Cleared on every path, including the throw: one leaked timer per
+      // poll is one per 1.5s for as long as the tab stays open.
+      clearTimeout(timer);
+    }
 
     // The user picked a different bot while this request was in flight — a
     // fresh poll for that bot is already on its way (the click handler
@@ -1730,7 +1757,14 @@ async function _poll() {
     lastGoodPollTs = Date.now();
     everConnected = true;
   } catch (err) {
-    console.warn("poll failed:", err.message);
+    // An abort is a failed poll like any other — the badge must desaturate
+    // and keep ageing, not pretend the last data is current. Named
+    // separately only so the console says which of the two it was.
+    if (err.name === "AbortError") {
+      console.warn(`poll timed out after ${POLL_TIMEOUT_MS}ms`);
+    } else {
+      console.warn("poll failed:", err.message);
+    }
   }
   renderStatus();
 }
