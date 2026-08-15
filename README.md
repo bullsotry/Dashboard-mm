@@ -82,21 +82,43 @@ while the stream is delivering — a stream that stops for any reason (no
 `EventSource`, a buffering proxy, a dropped tunnel) hands the next tick back
 to the poll within 8s, with no state machine in between.
 
-Why bother: measured over the real tunnel, the server does 8-20ms of work
-and the round trip costs ~240ms, so the poll *interval* dominated how stale
-the screen was — average staleness is half the interval plus the trip.
-Pushing removes the interval and the request leg both.
+Why bother, measured over the real Tokyo tunnel rather than argued:
 
-Two properties this must never lose, each guarded by a test:
+| | poll (750ms) | stream |
+|---|---|---|
+| bytes on the wire | 2717 B/s | **887 B/s** |
+| delivery | 240-490ms round trip, after up to 750ms of waiting | **112-223ms**, one way, unprompted |
+
+The server does 8-20ms of work per build, so the poll *interval* dominated
+how stale the screen was: average staleness is half the interval plus the
+round trip. Pushing removes the interval and the request leg both.
+
+The stream compresses ~29x rather than ~8x, which is why it costs a third of
+the poll despite sending more often: consecutive frames are nearly identical,
+and each one deflates against the window the previous ones built.
+
+(The one-way figure compares the frame's `server_ts` against the Mac's
+clock, so it carries whatever skew exists between the two hosts; it lands
+within a few ms of half the measured 272ms RTT, so that skew is small.)
+
+Three properties this must never lose, each guarded by a test:
 
 - **A heartbeat proves the link, never the bot.** Under a push transport,
   silence is the normal state of a healthy link, so something has to
   distinguish it from a dead one. But bot age must keep counting from the
   bot's own last write — a heartbeat that reset it would put a bot which
   stopped writing hours ago behind a green "live" badge.
-- **`/stream` is exempt from gzip.** `GzipFile` buffers until it has enough
-  input or is closed, and this response never closes, so a compressed
-  stream can connect successfully and then deliver nothing at all.
+- **The stream compresses itself, one frame at a time.** `GzipFile` buffers
+  until it has enough input or is closed, and this response never closes —
+  under the ordinary gzip middleware a compressed stream connects
+  successfully and then delivers nothing at all, forever. `/stream` is
+  therefore exempt from that middleware and runs its own `zlib` compressor,
+  ending every frame with an explicit `Z_SYNC_FLUSH` so it leaves complete
+  and decodes on arrival.
+- **The NAV curve is sampled by the warm loop, never by a request.** It used
+  to be sampled once per snapshot build, which made its x-axis "however
+  often somebody happened to be looking" — and made every build differ from
+  the last, so the stream suppressed nothing and resent everything.
 
 ## Several tabs are several threads
 

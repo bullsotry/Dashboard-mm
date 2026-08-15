@@ -92,7 +92,11 @@ def test_stale_leg_is_dropped_and_named():
     assert len(stale) == 1
     assert stale[0]["key"] == "okx:SOLUSDT"
     assert stale[0]["reason"] == "stale mid"
-    assert approx(stale[0]["age_s"], 482_459.4, tol=0.01)
+    # The leg's own timestamp, not an age: the server must not send a field
+    # that changes on every call, or /stream never suppresses anything.
+    # now - 482_459.4, so the client's own subtraction gives the age back.
+    assert approx(stale[0]["ts"], now - 482_459.4, tol=0.01)
+    assert approx(now - stale[0]["ts"], 482_459.4, tol=0.01)
     # One fresh leg left -> nothing to pair, so nothing is shown.
     assert compute_basis_pairs(fresh, now=now) == []
 
@@ -106,7 +110,7 @@ def test_leg_without_timestamp_is_refused_not_trusted():
     fresh, stale = split_stale(legs, now=now, max_age_s=30.0)
     assert [l["key"] for l in fresh] == ["bitunix:SOLUSDT"]
     assert stale[0]["reason"] == "no timestamp"
-    assert stale[0]["age_s"] is None
+    assert stale[0]["ts"] is None
 
 
 def test_both_legs_fresh_survive_with_skew():
@@ -128,7 +132,42 @@ def test_both_legs_fresh_survive_with_skew():
     # Tolerance is 1e-6, not 1e-9: these are differences of ~1.79e9-magnitude
     # epoch timestamps, where a double's ulp is already ~2.4e-7.
     assert approx(p["skew_s"], 11.7, tol=1e-6)
-    assert approx(p["age_s"], 12.0, tol=1e-6)
+    # Same rule for the pair: the older mid's timestamp, not its age.
+    # now - 12.0 is the coinbase leg, which is the older of the two.
+    assert approx(p["oldest_ts"], now - 12.0, tol=1e-6)
+    assert approx(now - p["oldest_ts"], 12.0, tol=1e-6)
+
+
+def test_output_does_not_move_with_the_clock():
+    """Nothing here may carry a field derived from `now`.
+
+    This is the bug that shipped: `age_s` was recomputed against the server
+    clock on every build, so /stream saw a different payload every 0.5s,
+    suppressed nothing, and resent the entire snapshot forever — a push
+    transport degenerated into a poll. Two calls five seconds apart, on the
+    same legs and the same side of the staleness threshold, must produce
+    byte-identical output.
+    """
+    base = 1_786_540_400.0
+    legs = [
+        leg("bitunix:SOLUSDT", "bitunix", "SOLUSDT", 76.355, ts=base - 1.0),
+        leg("coinbase:SOL-USD", "coinbase", "SOL-USD", 76.375, ts=base - 2.0),
+        leg("okx:SOLUSDT", "okx", "SOLUSDT", 72.595, ts=base - 500_000.0),
+        leg("okx:NOTS", "okx", "NOTS", 1.0, ts=0.0),
+    ]
+
+    fresh_a, stale_a = split_stale(legs, now=base, max_age_s=30.0)
+    fresh_b, stale_b = split_stale(legs, now=base + 5.0, max_age_s=30.0)
+    assert stale_a == stale_b, f"stale legs moved with the clock: {stale_a} != {stale_b}"
+
+    pairs_a = compute_basis_pairs(fresh_a, now=base)
+    pairs_b = compute_basis_pairs(fresh_b, now=base + 5.0)
+    # `history` is genuinely time-varying state held elsewhere; everything
+    # this function computes must not be.
+    strip = lambda ps: [{k: v for k, v in p.items() if k != "history"} for p in ps]
+    assert strip(pairs_a) == strip(pairs_b), (
+        f"basis pairs moved with the clock: {strip(pairs_a)} != {strip(pairs_b)}"
+    )
 
 
 def _run_all():

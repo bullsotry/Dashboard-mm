@@ -13,6 +13,7 @@ import hashlib
 import json
 import threading
 import time
+import zlib
 from collections import deque
 from pathlib import Path
 
@@ -63,19 +64,20 @@ async def _no_cache_static(request, call_next):
 # 304 with an empty body, a stale ETag returns 200 gzipped) — that 304 path
 # is what keeps a redeployed app.js from being served stale by Safari.
 class _GZipExceptStream(GZipMiddleware):
-    """GZip everything except the SSE stream.
+    """GZip everything except the SSE stream, which compresses itself.
 
     GzipFile buffers: it emits nothing until it has enough input or is
     closed. For a normal response that is invisible, because the response
-    ends. For /stream the response never ends, so an event written into the
-    compressor can sit in that buffer indefinitely — the push transport
-    would look connected and deliver nothing, which is worse than the poll
-    it replaced. SSE frames are ~2.4KB of JSON that already benefit from
-    `ksig` suppression, so skipping compression here costs little and
-    removes a whole class of "connected but silent" failure.
+    ends. For /stream the response never ends, so an event written into that
+    buffer can sit there indefinitely — the transport would look connected
+    and deliver nothing.
 
-    EventSource cannot set request headers, so the client has no way to opt
-    out of compression itself — it has to be decided here.
+    Leaving the stream uncompressed was measured and rejected: a snapshot
+    frame is ~24KB raw against ~2KB gzipped, so an uncompressed stream cost
+    ~18.6KB/s where the poll it replaces costs ~2.7KB/s. Six times the bytes
+    over an SSH tunnel is not an improvement, whatever it does for latency.
+    So /stream compresses each frame itself with an explicit Z_SYNC_FLUSH —
+    see `_sse_frames` — which is the part GzipFile will not do.
     """
 
     async def __call__(self, scope, receive, send) -> None:
@@ -216,16 +218,33 @@ def _account_warm_loop() -> None:
 
     Ticking faster than the adapters' TTL means the expiry is essentially
     always reached here first, so requests find a warm cache and return
-    without touching the network. Nothing is computed or stored here: this
-    only pre-pays the same fetch the request would otherwise have made, so
-    the numbers served are identical either way.
+    without touching the network.
+
+    This is also where the NAV curve is sampled, and it has to be. Sampling
+    used to happen in `_bot_summary`, i.e. once per snapshot build — so the
+    curve's x-axis was "however often somebody happened to be looking":
+    faster with two tabs open, faster again under /stream, and flat-out
+    nothing while no tab was open. A chart whose sample rate depends on who
+    is watching is a number with no protocol behind it. Here the cadence is
+    stated and fixed: one sample per tick, whatever the UI is doing.
+
+    It is also what let /stream work at all. A snapshot that grew a NAV
+    point on every build differed from the previous one by construction, so
+    nothing was ever suppressed and the stream resent the whole payload
+    every 0.5s — a push transport that had degenerated into a poll.
     """
     interval = max(0.5, config.ACCOUNT_POLL_INTERVAL_S / 2)
     while True:
         try:
-            for adapter in list(_account_adapters.values()):
-                if adapter is not None:
-                    adapter.get_account()  # returns None on failure, never raises
+            for key, adapter in list(_account_adapters.items()):
+                if adapter is None:
+                    continue
+                account = adapter.get_account()  # returns None on failure, never raises
+                if account is not None:
+                    hist = _nav_history.setdefault(
+                        key, deque(maxlen=config.NAV_HISTORY_LEN)
+                    )
+                    hist.append({"ts": time.time(), "equity": account["equity"]})
         except Exception:
             pass  # same reasoning as _background_state_loop
         time.sleep(interval)
@@ -457,10 +476,10 @@ def _bot_summary(key: str, bot_info: DiscoveredBot) -> dict:
         until_ts=session.end_ts if session else None,
     )
     account_adapter = _account_adapters.get(key)
+    # Read-only: the NAV sample is taken by _account_warm_loop on a fixed
+    # cadence. Recording it here instead made the curve's sample rate a
+    # function of how often the UI asked, which is not a protocol.
     account = account_adapter.get_account() if account_adapter else None
-    if account is not None:
-        hist = _nav_history.setdefault(key, deque(maxlen=config.NAV_HISTORY_LEN))
-        hist.append({"ts": time.time(), "equity": account["equity"]})
     return {
         "key": key,
         "label": bot_info.label,
@@ -653,8 +672,6 @@ def _build_snapshot(
         "supported_intervals": supported,
     }
 
-    # Every bot's summary is (re)built before this line, so the selected
-    # bot's own account sample has already landed in _nav_history this poll.
     bot_list = [_bot_summary(k, found[k]) for k in sorted(found)]
     venue["nav_curve"] = list(_nav_history.get(bot, []))
 
@@ -735,7 +752,7 @@ async def stream(
     including the poll fallback this is supposed to be an improvement over.
     """
 
-    async def events():
+    async def frames():
         last_fingerprint: str | None = None
         last_klines_sig: str | None = None
         last_send = 0.0
@@ -772,14 +789,39 @@ async def stream(
 
             await asyncio.sleep(config.STREAM_INTERVAL_S)
 
-    return StreamingResponse(
-        events(),
-        media_type="text/event-stream",
-        headers={
-            # No buffering anywhere: an SSE frame held back by a proxy or by
-            # a compression buffer defeats the entire point of pushing.
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+    headers = {
+        # No buffering anywhere: an SSE frame held back by a proxy defeats
+        # the entire point of pushing.
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    accepts_gzip = "gzip" in request.headers.get("accept-encoding", "").lower()
+    body = frames()
+    if accepts_gzip:
+        headers["Content-Encoding"] = "gzip"
+        headers["Vary"] = "Accept-Encoding"
+        body = _gzip_frames(body)
+
+    return StreamingResponse(body, media_type="text/event-stream", headers=headers)
+
+
+async def _gzip_frames(source):
+    """Compress an SSE stream one frame at a time.
+
+    The flush is the whole point. A gzip stream normally emits nothing until
+    the compressor has enough input or is closed, which for an endless
+    response means never — that is why the middleware refuses to touch this
+    route. `Z_SYNC_FLUSH` ends the current deflate block and pads to a byte
+    boundary, so every frame leaves the compressor complete and the client
+    decodes it the moment it arrives, while later frames still compress
+    against the window the earlier ones built.
+
+    Worth ~10x here: a snapshot frame is ~24KB of JSON whose shape barely
+    changes between sends, which is the case deflate is best at.
+    """
+    compressor = zlib.compressobj(5, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+    async for frame in source:
+        chunk = compressor.compress(frame.encode()) + compressor.flush(zlib.Z_SYNC_FLUSH)
+        if chunk:
+            yield chunk

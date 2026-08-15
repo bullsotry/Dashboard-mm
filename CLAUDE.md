@@ -107,7 +107,7 @@ Two more rules the drag controls have already broken once each:
   reflows and scrolls at its authored size. Same rule keeps the canvases
   sharp (they re-render via their `ResizeObserver`).
 
-One rule for `/stream`, paid for during its own build:
+Three rules for `/stream`, all paid for during its own build:
 
 - **Test the route, not just the function.** The stream's unit tests drive
   the route's async generator directly, because Starlette's `TestClient`
@@ -117,6 +117,17 @@ One rule for `/stream`, paid for during its own build:
   never exercised: a `/stream` that is not registered at all would pass
   every one of those tests. Finish with a real `uvicorn` and a real
   `curl -N`, and read the frames.
+- **Nothing in a payload may be derived from "now".** An age recomputed
+  server-side changes on every build, so the stream sees a different payload
+  every tick, suppresses nothing, and resends everything — a push transport
+  degenerated into a poll. Send the timestamp and let the client subtract,
+  which is what bot age already did. `basis.age_s` shipped this exact bug;
+  `tests/test_basis.py::test_output_does_not_move_with_the_clock` guards it.
+- **Building a snapshot must not mutate what the snapshot reports.** NAV
+  sampling lived in `_bot_summary`, i.e. once per build, so the curve's
+  sample rate was "however often somebody was looking" — and every build
+  differed from the last by construction. Sampling belongs in a warm loop on
+  a stated cadence; `tests/test_nav_sampling.py` guards that by AST.
 
 Two concurrency rules, both paid for once:
 

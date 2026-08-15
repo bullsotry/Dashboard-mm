@@ -440,7 +440,24 @@ function sparklineSvg(values, w = 60, h = 16) {
   return `<svg width="${w}" height="${h}" class="basis-spark"><polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`;
 }
 
-function renderBasis(basis) {
+// The server sends the leg's own timestamp rather than an age, because an
+// age recomputed server-side changes on every build and would make /stream
+// resend the whole snapshot forever (see StaleLeg.ts). Ageing it here costs
+// one subtraction and is the same thing the bot badge already does.
+//
+// `s.age_s` is the pre-timestamp shape: read it if it is still what arrives,
+// so a browser holding a cached bundle across the deploy shows a duration
+// instead of "NaN old".
+function staleAge(s, serverTs) {
+  const age =
+    s.ts !== undefined && s.ts !== null && serverTs
+      ? serverTs - s.ts
+      : s.age_s;
+  if (age === null || age === undefined || Number.isNaN(age)) return "no ts";
+  return fmtDuration(age) + " old";
+}
+
+function renderBasis(basis, serverTs) {
   const body = document.getElementById("basis-body");
   // Back-compat with the older shape (a bare array of pairs), so a stale
   // cached bundle talking to a new server doesn't blank the panel.
@@ -454,7 +471,7 @@ function renderBasis(basis) {
       (s) =>
         `<div class="row basis-row basis-stale">
            <span class="label">${s.key}</span>
-           <span class="val">${s.age_s === null ? "no ts" : fmtDuration(s.age_s) + " old"}</span>
+           <span class="val">${staleAge(s, serverTs)}</span>
          </div>`
     )
     .join("");
@@ -1639,7 +1656,7 @@ function renderStatus() {
 // there is one path from data to screen, and both transports enter it here.
 function applySnapshot(data) {
   renderBotList(data.bots, data.server_ts, data.bot);
-  renderBasis(data.basis || []);
+  renderBasis(data.basis || [], data.server_ts);
   renderIncidents(data.incidents || [], data.server_ts);
   // The server honours the requested bot when it still exists, so a
   // mismatch means either no choice had been made yet (first load lands on

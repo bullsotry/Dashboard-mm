@@ -69,7 +69,8 @@ tar czf - \
   tests/test_bitunix_account.py tests/test_bitunix_klines.py \
   tests/test_markouts.py tests/test_sessions.py \
   tests/test_concurrency.py tests/test_app_js_declarations.py \
-  tests/test_stream.py tests/frontend/dom_smoke.js \
+  tests/test_stream.py tests/test_nav_sampling.py \
+  tests/frontend/dom_smoke.js \
   requirements-dev.txt \
   deploy/dashboard-mm.service deploy/healthcheck.sh \
   deploy/dashboard-mm-health.service deploy/dashboard-mm-health.timer \

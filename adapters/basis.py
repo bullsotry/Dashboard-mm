@@ -57,7 +57,13 @@ class Leg(TypedDict):
 
 class StaleLeg(TypedDict):
     key: str
-    age_s: float | None  # None when the leg published no timestamp at all
+    # The leg's own timestamp, NOT an age. An age computed here would be a
+    # different number on every call, which under /stream means the whole
+    # snapshot is "changed" forever and nothing is ever suppressed — the
+    # push transport degenerates into a poll. The client subtracts this from
+    # the server clock it already receives, exactly as it already does for
+    # bot age. None when the leg published no timestamp at all.
+    ts: float | None
     reason: str
 
 
@@ -68,7 +74,10 @@ class BasisPair(TypedDict):
     label: str
     bps: float  # (mid_a - mid_b) / mid_b * 10000
     skew_s: float  # |ts_a - ts_b|: how unsynchronised the two mids are
-    age_s: float  # age of the older of the two mids at `now`
+    # Timestamp of the older of the two mids, not its age — same reason as
+    # StaleLeg.ts: a continuously-moving derived field defeats the stream's
+    # change detection.
+    oldest_ts: float | None
 
 
 def split_stale(
@@ -87,11 +96,11 @@ def split_stale(
     for leg in legs:
         ts = leg.get("ts")
         if not ts:
-            stale.append({"key": leg["key"], "age_s": None, "reason": "no timestamp"})
+            stale.append({"key": leg["key"], "ts": None, "reason": "no timestamp"})
             continue
         age = now - float(ts)
         if age > max_age_s:
-            stale.append({"key": leg["key"], "age_s": age, "reason": "stale mid"})
+            stale.append({"key": leg["key"], "ts": float(ts), "reason": "stale mid"})
             continue
         fresh.append(leg)
     return fresh, stale
@@ -158,7 +167,7 @@ def compute_basis_pairs(legs: list[Leg], now: float | None = None) -> list[Basis
                         "label": _pair_label(a, b, ambiguous),
                         "bps": bps,
                         "skew_s": skew_s,
-                        "age_s": (now - oldest) if (now and oldest) else 0.0,
+                        "oldest_ts": float(oldest) if oldest else None,
                     }
                 )
     return pairs

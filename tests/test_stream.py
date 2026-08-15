@@ -32,6 +32,7 @@ import asyncio
 import os
 import sys
 import time
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -49,10 +50,11 @@ import server  # noqa: E402
 
 
 class _FakeRequest:
-    """Only `is_disconnected` is ever touched by the route."""
+    """Only `is_disconnected` and `headers` are touched by the route."""
 
-    def __init__(self) -> None:
+    def __init__(self, accept_encoding: str = "") -> None:
         self.disconnected = False
+        self.headers = {"accept-encoding": accept_encoding}
 
     async def is_disconnected(self) -> bool:
         return self.disconnected
@@ -207,6 +209,68 @@ def test_stream_is_exempt_from_compression():
     assert asyncio.run(call("/snapshot")) is not sentinel, (
         "every other path must still be compressed; /snapshot is 93% candles"
     )
+
+
+def test_gzip_frames_arrive_one_at_a_time():
+    """The failure this guards is total silence, not slowness.
+
+    A gzip stream emits nothing until the compressor has enough input or is
+    closed — and this response never closes, so without an explicit flush a
+    compressed stream connects successfully and then delivers nothing at
+    all, forever. Z_SYNC_FLUSH is what ends each deflate block. The test is
+    therefore: decompress what came out of frame 1, and require the complete
+    frame 1 back, before frame 2 has been produced.
+    """
+
+    def stub(bot=None, interval=None, ksig=None, session=None):
+        # `n` guarantees a change every build, so every tick is a real send.
+        stub.n = getattr(stub, "n", 0) + 1
+        return {"server_ts": time.time(), "bot": "b", "n": stub.n, "venue": None}
+
+    async def run():
+        request = _FakeRequest(accept_encoding="gzip")
+        response = await server.stream(request)
+        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        seen = []
+        async for chunk in response.body_iterator:
+            assert isinstance(chunk, bytes), "the gzip path must yield bytes"
+            text = decompressor.decompress(chunk).decode()
+            # Complete, self-terminated, and readable right now — not once
+            # the response ends, which for a stream is never.
+            assert text.endswith("\n\n"), f"frame arrived truncated: {text!r}"
+            seen.append(text)
+            if len(seen) >= 3:
+                request.disconnected = True
+                break
+        return seen
+
+    frames = _with_stub(stub, lambda: asyncio.run(run()))
+    assert len(frames) == 3
+    assert all(f.startswith("event: snapshot") for f in frames), frames
+    # Later frames compress against the window the earlier ones built, which
+    # is the reason for compressing the stream rather than each frame alone.
+    assert len(frames) == 3
+
+
+def test_a_client_that_cannot_gunzip_gets_plain_text():
+    """EventSource sets Accept-Encoding itself and every browser offers
+    gzip, but a diagnostic curl may not — and handing it bytes it did not
+    ask for would make the stream unreadable exactly when someone is
+    debugging it."""
+
+    def stub(bot=None, interval=None, ksig=None, session=None):
+        return {"server_ts": time.time(), "bot": "b", "venue": None}
+
+    async def run():
+        request = _FakeRequest(accept_encoding="identity")
+        response = await server.stream(request)
+        assert "content-encoding" not in {k.lower() for k in response.headers}
+        async for chunk in response.body_iterator:
+            request.disconnected = True
+            return chunk
+
+    chunk = _with_stub(stub, lambda: asyncio.run(run()))
+    assert isinstance(chunk, str) and chunk.startswith("event: snapshot")
 
 
 def test_fingerprint_ignores_only_the_clock():
