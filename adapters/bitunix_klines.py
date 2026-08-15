@@ -123,11 +123,30 @@ class BitunixKlineAdapter:
         except (requests.RequestException, ValueError):
             return []  # keep last-known-good rather than blanking the chart
 
-    def get_klines(self, interval: str, since_ts: float | None = None) -> list[Candle]:
+    def get_klines(
+        self,
+        interval: str,
+        since_ts: float | None = None,
+        serve_only: bool = False,
+    ) -> list[Candle]:
         """`since_ts` is how far back the chart should reach — normally the
         bot's first known fill, so the visible history covers the whole time
         the bot has been quoting instead of an arbitrary 200 bars (3h20 on
-        1m, which cut the session off mid-morning)."""
+        1m, which cut the session off mid-morning).
+        `serve_only` is what /snapshot passes: answer from cache, never make
+        the caller wait on this venue. Up to MAX_PAGES_PER_CALL pages at a 5s
+        timeout means a request could block for the better part of a minute
+        on a backfill — the same stall the account warm loop was written to
+        remove, left in place here. server.py's kline warm loop now owns the
+        fetching; the request path only reads what that loop has already put
+        in the cache.
+
+        The one exception is a genuinely cold cache, where serving nothing
+        would mean a blank chart until the next warm tick. There it fetches
+        the recent page and only that: one round trip instead of eight, so a
+        cold start is *faster* than it was, and the warm loop fills in the
+        history behind it.
+        """
         if interval not in SUPPORTED_INTERVALS:
             interval = DEFAULT_INTERVAL
 
@@ -156,6 +175,13 @@ class BitunixKlineAdapter:
             needs_history = not bars or (
                 min(bars) > target + step and len(bars) < MAX_CANDLES and not at_floor
             )
+            # Cache is populated: serve it and let the warm loop do the
+            # fetching. `needs_history` is deliberately ignored — extending
+            # the chart backwards is worth a background round trip, never a
+            # request the operator is waiting on.
+            if serve_only and bars:
+                return self._materialise(entry)
+
             if now - entry["last_poll_ts"] < self._poll_interval_s and not needs_history:
                 return self._materialise(entry)
             entry["last_poll_ts"] = now
@@ -182,7 +208,11 @@ class BitunixKlineAdapter:
             pages = 0
             # `not at_floor` here too — see bitunix_klines for why the loop
             # must respect the floor, not just the cache check above.
-            while pages < MAX_PAGES_PER_CALL and not at_floor:
+            # serve_only reaching here means the cache was empty: take the
+            # recent page above and stop, rather than paging history on a
+            # thread the browser is blocked on.
+            max_pages = 0 if serve_only else MAX_PAGES_PER_CALL
+            while pages < max_pages and not at_floor:
                 with self._guard.data:
                     if not bars or len(bars) >= MAX_CANDLES or min(bars) <= target + step:
                         break

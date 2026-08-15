@@ -120,6 +120,14 @@ POLL_INTERVAL_S = float(os.environ.get("POLL_INTERVAL_S", "1.0"))
 ACCOUNT_POLL_INTERVAL_S = float(os.environ.get("ACCOUNT_POLL_INTERVAL_S", "5.0"))
 KLINE_POLL_INTERVAL_S = float(os.environ.get("KLINE_POLL_INTERVAL_S", "20.0"))
 
+# How long a (bot, interval) pair keeps being refreshed in the background
+# after the last request that asked for it. The kline warm loop cannot
+# refresh every interval of every bot — 8 granularities x N bots would be an
+# 8x REST bill for candles nobody is looking at — so it warms exactly what
+# the UI has asked for recently. Switching timeframe therefore stops warming
+# the old one after this long, and a tab left open keeps its own warm.
+KLINE_WARM_TTL_S = float(os.environ.get("KLINE_WARM_TTL_S", "120.0"))
+
 BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
 BIND_PORT = int(os.environ.get("BIND_PORT", "8091"))
 

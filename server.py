@@ -54,6 +54,13 @@ _kline_adapters: dict[str, object] = {}
 _account_adapters: dict[str, object] = {}
 _last_scan_ts = 0.0
 
+# What the kline warm loop should keep hot: bot key -> (interval, since_ts,
+# last_requested_ts). Written by /snapshot, read by the loop. Only intervals
+# a browser has actually asked for within KLINE_WARM_TTL_S are refreshed —
+# warming all 8 granularities of every bot would multiply this dashboard's
+# REST footprint for candles nobody is looking at.
+_kline_warm: dict[str, tuple[str, float | None, float]] = {}
+
 # Basis history is keyed by "leg_a|leg_b" (stable per venue pair) and kept
 # across polls independently of which bot is selected in the chart — the
 # basis panel shows every discovered pair, not just the active one.
@@ -178,8 +185,52 @@ def _account_warm_loop() -> None:
         time.sleep(interval)
 
 
+def _kline_warm_loop() -> None:
+    """Keeps the candle cache hot off the request path.
+
+    Same defect the account warm loop was written for, left standing on the
+    klines: /snapshot called get_klines() inline, and a cold or expired
+    interval fetches up to MAX_PAGES_PER_CALL pages at a 5s timeout — a
+    potential ~40s stall on a request the operator is watching, and roughly
+    one round trip in every 13 polls in steady state (a 20s adapter TTL
+    against a 1.5s poll).
+
+    Now the request path calls get_klines(serve_only=True), which never
+    fetches when it has bars, and this loop does the fetching. Ticking at
+    half the adapter's own poll interval means the expiry is essentially
+    always reached here first, so requests find a warm cache.
+
+    Nothing is computed or stored here — it pre-pays exactly the fetch the
+    request would have made, so the candles served are identical either way.
+    """
+    interval = max(0.5, config.KLINE_POLL_INTERVAL_S / 2)
+    while True:
+        try:
+            now = time.time()
+            with _lock:
+                targets = {
+                    key: (iv, since_ts)
+                    for key, (iv, since_ts, asked_ts) in _kline_warm.items()
+                    if now - asked_ts <= config.KLINE_WARM_TTL_S
+                }
+                # Drop what nobody has asked for in a while (tab closed, or
+                # the operator switched timeframe) so it stops costing REST.
+                for key in set(_kline_warm) - set(targets):
+                    _kline_warm.pop(key, None)
+            for key, (iv, since_ts) in targets.items():
+                adapter = _kline_adapters.get(key)
+                if adapter is not None:
+                    # Full behaviour, backfill included: this thread is the
+                    # one that is allowed to wait on the venue.
+                    adapter.get_klines(iv, since_ts=since_ts)
+        except Exception:
+            pass  # same reasoning as _background_state_loop
+        time.sleep(interval)
+
+
 threading.Thread(target=_background_state_loop, daemon=True).start()
 threading.Thread(target=_account_warm_loop, daemon=True).start()
+threading.Thread(target=_kline_warm_loop, daemon=True).start()
 
 
 def _refresh(force: bool = False) -> dict[str, DiscoveredBot]:
@@ -228,6 +279,7 @@ def _refresh(force: bool = False) -> dict[str, DiscoveredBot]:
             _kline_adapters.pop(key, None)
             _account_adapters.pop(key, None)
             _nav_history.pop(key, None)
+            _kline_warm.pop(key, None)
 
         _bots.clear()
         _bots.update(found)
@@ -492,8 +544,15 @@ def snapshot(
     # The chart follows the session too: an operator looking at tonight's
     # performance wants tonight's candles, not every bar back to the oldest
     # fill still in the ledger.
+    kline_since = session_start or state.get_first_fill_ts()
+    # Tell the warm loop what this tab is looking at, then read the cache it
+    # keeps hot. `serve_only` is what keeps a venue round trip off this
+    # thread — see _kline_warm_loop and the adapters' get_klines docstring.
+    if kline_adapter is not None:
+        with _lock:
+            _kline_warm[bot] = (interval, kline_since, now_ts)
     klines = (
-        kline_adapter.get_klines(interval, since_ts=session_start or state.get_first_fill_ts())
+        kline_adapter.get_klines(interval, since_ts=kline_since, serve_only=True)
         if kline_adapter
         else []
     )
