@@ -96,6 +96,23 @@ Two more rules the drag controls have already broken once each:
   reflows and scrolls at its authored size. Same rule keeps the canvases
   sharp (they re-render via their `ResizeObserver`).
 
+Two concurrency rules, both paid for once:
+
+- **Every adapter is shared by several threads.** `/snapshot` is a sync
+  route (threadpool: one thread per in-flight request) and three warm loops
+  run alongside it, all against the same cached adapter instances. Anything
+  that reads-then-writes instance state — a tail offset, a memoised replay —
+  must be locked. Before it was, eight threads reading one 3000-row ledger
+  tailed it as 20000 rows and reported ~9798 of realised PnL against a true
+  1470, with two threads disagreeing on the wrong answer.
+- **Never hold a lock across a network call.** A kline backfill is up to
+  eight pages at a 5s timeout; a plain mutex around it makes a reader wait
+  the better part of a minute for data already in the cache — reintroducing
+  the exact stall the warm loops exist to remove. Use
+  `adapters/_locking.CacheGuard`: a data lock for dict merges only, plus a
+  *non-blocking* fetch gate, so there is one in-flight fetch and everyone
+  else serves the cache. `tests/test_concurrency.py` covers both.
+
 `tests/test_app_js_declarations.py` guards the specific shape that caused
 it (a function declared twice at top level, hoisting over a `const` still
 in its temporal dead zone) and does run in the pytest suite.

@@ -39,6 +39,47 @@ ageing during an outage instead of freezing at its last value. Anything other
 than a clean live state desaturates the data panels, so stale numbers look
 wrong from across the room rather than requiring you to read a small badge.
 
+A poll that hangs is treated as a poll that failed. Each request carries a
+timeout of 3x the poll interval, because a fetch against a tunnel that has
+gone silent settles neither way for minutes — and the "one request in flight
+at a time" guard would then hold forever, leaving a page that ages its badge
+honestly while having quietly stopped asking. It recovers on its own when
+the link comes back.
+
+## Nothing the operator waits on talks to a venue
+
+Every venue round trip happens on a background thread, never inside
+`/snapshot`. Account margin and candles are both refreshed by warm loops
+(`server._account_warm_loop`, `server._kline_warm_loop`) that tick at half
+the adapters' own poll interval, so a request finds a warm cache and returns
+without touching the network. Requests ask for candles with
+`serve_only=True`, which answers from cache and declines to fetch even when
+the chart could be extended further back — that is worth a background round
+trip, never a request someone is watching. The one exception is a cold
+cache, which fetches the most recent page and only that: one round trip
+instead of up to eight, so a chart appears fast and fills in its history
+behind itself.
+
+The warm loop refreshes only what the UI has actually asked for in the last
+`KLINE_WARM_TTL_S` (120s). Warming all eight granularities of every bot
+would multiply this dashboard's REST footprint for candles nobody is
+looking at.
+
+Responses are gzipped (`compresslevel=5`), which matters because the whole
+thing is read over an SSH tunnel: a snapshot is a couple of hundred KB of
+JSON resent every poll.
+
+## Several tabs are several threads
+
+`/snapshot` is a sync route, so FastAPI serves it from a threadpool: two
+open tabs, or a forced poll landing on a pending one, put several threads
+inside the same cached adapter at once, and the warm loops add more. Every
+adapter is therefore internally locked, in one of two ways depending on
+whether its critical section touches the network — see `adapters/_locking.py`
+and the concurrency rules in CLAUDE.md. This is not theoretical tidiness:
+before the locks, eight threads reading one 3000-row fill ledger tailed it
+as 20000 rows and reported a realised PnL of ~9798 against a true 1470.
+
 ## Design constraints
 
 - **Read-only by construction.** It never places orders, never imports the
@@ -72,6 +113,7 @@ adapters/
   stats.py                FIFO realised PnL + cash-flow PnL + fill metrics (pure, no I/O)
   sessions.py             pure: session bounds, read from the tracker's own session log
   markouts.py             pure: post-fill mid drift per horizon, signed by side
+  _locking.py             shared thread-safety plumbing (see 'Several tabs' above)
   bot_files.py            reads one bot's state (orderbook, positions, fills, quotes)
   basis.py                pure: pairs legs sharing a base asset, mid gap in bps
   bitunix_account.py      Bitunix REST, signed, GET-only (margin/equity)
