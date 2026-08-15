@@ -2,7 +2,16 @@
  * except that GET. No websockets, no auth — this only runs behind an SSH
  * tunnel to 127.0.0.1 on the VPS. */
 
-const POLL_MS = 1500;
+// 750ms, halved from 1500. Measured against the real Tokyo tunnel, a poll
+// costs 8-20ms of server work and ~240ms of round trip (one RTT; the link
+// itself pings at 272ms), for a 2.4KB gzipped body once `ksig` suppresses
+// the candles. So the interval, not the transport, was the dominant term in
+// how stale the screen is: average staleness is half the interval plus the
+// round trip, i.e. ~1.1s at 1500ms and ~0.73s at 750ms. Doubling the request
+// rate costs the VPS 13.6ms of CPU per second — 1.36% of one core, against
+// bots it shares cores with. Measured on the live host over 200 polls:
+// 10.2ms of process CPU each.
+const POLL_MS = 750;
 // A poll that never comes back stops the loop dead. `pollInFlight` below is
 // released in a finally, but a fetch against a tunnel that has become a
 // black hole (no RST, just silence) settles neither way for minutes, so the
@@ -11,16 +20,21 @@ const POLL_MS = 1500;
 // is working while it has stopped asking. Only a bot switch or a tab focus
 // (both force=true) could wake it.
 //
-// 3x POLL_MS: wide enough for the several-second round trip an SSH tunnel to
-// a loaded VPS really does take (see LINK_STALE_MS below, set for the same
-// reason), tight enough to recover inside one badge tick. AbortController
-// rather than AbortSignal.timeout() because this is read from Safari and
-// this file already carries two WebKit workarounds; the manual form works
-// everywhere.
+// An absolute 4500ms, NOT a multiple of POLL_MS. It used to be POLL_MS * 3,
+// which quietly meant this budget shrank when the poll interval did — and
+// halving POLL_MS to 750 would have cut it to 2250ms, tight enough to abort
+// honest polls: the first request on a fresh tunnel connection measured
+// 1.79s (SSH channel setup), against 0.24-0.65s in steady state. The timeout
+// guards the round trip, so it must track the round trip, not the cadence.
+// Wide enough for the several-second trip an SSH tunnel to a loaded VPS
+// really does take (see LINK_STALE_MS below, set for the same reason),
+// tight enough to recover inside one badge tick. AbortController rather
+// than AbortSignal.timeout() because this is read from Safari and this file
+// already carries two WebKit workarounds; the manual form works everywhere.
 //
 // The window override exists so the DOM smoke test can drive this path in
 // milliseconds instead of waiting 4.5s.
-const POLL_TIMEOUT_MS = window.__POLL_TIMEOUT_MS__ || POLL_MS * 3;
+const POLL_TIMEOUT_MS = window.__POLL_TIMEOUT_MS__ || 4500;
 // Two independent failure modes, two independent clocks:
 //   link  — we cannot reach our own server (tunnel dropped, uvicorn died).
 //   bot   — the server answers fine, but the bot stopped writing its state.
