@@ -43,6 +43,7 @@ import ssl
 import time
 from datetime import datetime, timezone
 
+from ._locking import CacheGuard
 from .base import Account
 
 _DEFAULT_HOST = "eea.okx.com"
@@ -114,79 +115,90 @@ class OkxAccountAdapter:
         self._host = host
         self._cached: Account | None = None
         self._last_poll_ts = 0.0
+        # One in-flight signed request per adapter; see adapters/_locking.
+        self._guard = CacheGuard()
 
     def get_account(self) -> Account | None:
         now = time.time()
         if now - self._last_poll_ts < self._poll_interval_s:
             return self._cached
-        self._last_poll_ts = now
-
-        query = f"?ccy={self._margin_coin}"
-        request_path = _BALANCE_PATH + query
-        timestamp = _iso_timestamp()
-        sign = _sign(self._secret_key, timestamp, "GET", request_path, "")
-        headers = {
-            "OK-ACCESS-KEY": self._api_key,
-            "OK-ACCESS-SIGN": sign,
-            "OK-ACCESS-TIMESTAMP": timestamp,
-            "OK-ACCESS-PASSPHRASE": self._passphrase,
-            "Content-Type": "application/json",
-        }
-        try:
-            status, body = _get_ipv4(self._host, request_path, headers, timeout_s=5.0)
-            if status != 200:
+        # Non-blocking: /snapshot (one thread per browser tab) and the
+        # background warm loop all call this on the same cached instance. A
+        # blocking lock would make a request wait out someone else's round
+        # trip; racing without one fires duplicate *signed* requests at the
+        # venue and can publish an older reply over a newer one. Whoever is
+        # already fetching will refresh the cache — everyone else serves it.
+        with self._guard.try_fetch() as fetching:
+            if not fetching:
                 return self._cached
-            payload = json.loads(body)
-        except (OSError, ValueError):
-            return self._cached  # keep last-known-good rather than blanking the panel
+            self._last_poll_ts = now
 
-        rows = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(rows, list) or not rows:
+            query = f"?ccy={self._margin_coin}"
+            request_path = _BALANCE_PATH + query
+            timestamp = _iso_timestamp()
+            sign = _sign(self._secret_key, timestamp, "GET", request_path, "")
+            headers = {
+                "OK-ACCESS-KEY": self._api_key,
+                "OK-ACCESS-SIGN": sign,
+                "OK-ACCESS-TIMESTAMP": timestamp,
+                "OK-ACCESS-PASSPHRASE": self._passphrase,
+                "Content-Type": "application/json",
+            }
+            try:
+                status, body = _get_ipv4(self._host, request_path, headers, timeout_s=5.0)
+                if status != 200:
+                    return self._cached
+                payload = json.loads(body)
+            except (OSError, ValueError):
+                return self._cached  # keep last-known-good rather than blanking the panel
+
+            rows = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(rows, list) or not rows:
+                return self._cached
+
+            # Account-wide equity across every currency, in USD. Reported
+            # alongside, never folded into `equity`: this account holds twelve
+            # currencies (3995.70 USD total live) of which only the settlement
+            # one has anything to do with this bot.
+            try:
+                total_eq = float(rows[0].get("totalEq") or 0.0) or None
+            except (TypeError, ValueError):
+                total_eq = None
+
+            details = [d for d in (rows[0].get("details") or []) if isinstance(d, dict)]
+            detail = next((d for d in details if str(d.get("ccy") or "").upper() == self._margin_coin), None)
+            if detail is None:
+                detail = details[0] if details else {}
+
+            def _f(*keys: str) -> float:
+                for k in keys:
+                    v = detail.get(k)
+                    if v not in (None, ""):
+                        try:
+                            return float(v)
+                        except (TypeError, ValueError):
+                            continue
+                return 0.0
+
+            equity = _f("eq")
+            available = _f("availEq", "availBal", "cashBal")
+            upnl = _f("upl")
+            # OKX reports what's locked as one number (`frozenBal`) without
+            # splitting order-locked from position-margin, so it lands in
+            # `frozen` — the field whose absence broke the Bitunix NAV — and
+            # `margin_used` keeps only whatever `eq` accounts for beyond it.
+            frozen = _f("frozenBal", "ordFrozen")
+            margin_used = max(0.0, equity - available - upnl - frozen)
+
+            self._cached = {
+                "available": available,
+                "margin_used": margin_used,
+                "frozen": frozen,
+                "unrealised_pnl": upnl,
+                "equity": equity,
+                # Named, because it is one currency out of however many the
+                # account holds — the panel used to present it as "the" NAV.
+                "equity_scope": f"{self._margin_coin} only",
+                "account_equity_total": total_eq,
+            }
             return self._cached
-
-        # Account-wide equity across every currency, in USD. Reported
-        # alongside, never folded into `equity`: this account holds twelve
-        # currencies (3995.70 USD total live) of which only the settlement
-        # one has anything to do with this bot.
-        try:
-            total_eq = float(rows[0].get("totalEq") or 0.0) or None
-        except (TypeError, ValueError):
-            total_eq = None
-
-        details = [d for d in (rows[0].get("details") or []) if isinstance(d, dict)]
-        detail = next((d for d in details if str(d.get("ccy") or "").upper() == self._margin_coin), None)
-        if detail is None:
-            detail = details[0] if details else {}
-
-        def _f(*keys: str) -> float:
-            for k in keys:
-                v = detail.get(k)
-                if v not in (None, ""):
-                    try:
-                        return float(v)
-                    except (TypeError, ValueError):
-                        continue
-            return 0.0
-
-        equity = _f("eq")
-        available = _f("availEq", "availBal", "cashBal")
-        upnl = _f("upl")
-        # OKX reports what's locked as one number (`frozenBal`) without
-        # splitting order-locked from position-margin, so it lands in
-        # `frozen` — the field whose absence broke the Bitunix NAV — and
-        # `margin_used` keeps only whatever `eq` accounts for beyond it.
-        frozen = _f("frozenBal", "ordFrozen")
-        margin_used = max(0.0, equity - available - upnl - frozen)
-
-        self._cached = {
-            "available": available,
-            "margin_used": margin_used,
-            "frozen": frozen,
-            "unrealised_pnl": upnl,
-            "equity": equity,
-            # Named, because it is one currency out of however many the
-            # account holds — the panel used to present it as "the" NAV.
-            "equity_scope": f"{self._margin_coin} only",
-            "account_equity_total": total_eq,
-        }
-        return self._cached

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import time
 
+from ._locking import CacheGuard
 from .base import Account
 
 try:
@@ -57,6 +58,8 @@ class CoinbaseAccountAdapter:
         self._poll_interval_s = poll_interval_s
         self._cached: Account | None = None
         self._last_poll_ts = 0.0
+        # One in-flight signed request per adapter; see adapters/_locking.
+        self._guard = CacheGuard()
 
     def get_account(self) -> Account | None:
         if self._client is None:
@@ -64,43 +67,52 @@ class CoinbaseAccountAdapter:
         now = time.time()
         if now - self._last_poll_ts < self._poll_interval_s:
             return self._cached
-        self._last_poll_ts = now
+        # Non-blocking: /snapshot (one thread per browser tab) and the
+        # background warm loop all call this on the same cached instance. A
+        # blocking lock would make a request wait out someone else's round
+        # trip; racing without one fires duplicate *signed* requests at the
+        # venue and can publish an older reply over a newer one. Whoever is
+        # already fetching will refresh the cache — everyone else serves it.
+        with self._guard.try_fetch() as fetching:
+            if not fetching:
+                return self._cached
+            self._last_poll_ts = now
 
-        try:
-            resp = self._client.get_accounts(limit=250)
-        except Exception:
-            return self._cached  # keep last-known-good rather than blanking the panel
-
-        accounts = getattr(resp, "accounts", None) or []
-        account = next((a for a in accounts if getattr(a, "currency", None) == self._quote), None)
-        if account is None:
-            return self._cached
-
-        def _amount(obj) -> float:
-            if obj is None:
-                return 0.0
-            val = getattr(obj, "value", None) if not isinstance(obj, dict) else obj.get("value")
             try:
-                return float(val or 0.0)
-            except (TypeError, ValueError):
-                return 0.0
+                resp = self._client.get_accounts(limit=250)
+            except Exception:
+                return self._cached  # keep last-known-good rather than blanking the panel
 
-        available = _amount(getattr(account, "available_balance", None))
-        held = _amount(getattr(account, "hold", None))
+            accounts = getattr(resp, "accounts", None) or []
+            account = next((a for a in accounts if getattr(a, "currency", None) == self._quote), None)
+            if account is None:
+                return self._cached
 
-        self._cached = {
-            "available": available,
-            # Spot has no position margin; what's held is held by resting
-            # orders, which is exactly what `frozen` means on the other
-            # venues.
-            "margin_used": 0.0,
-            "frozen": held,
-            "unrealised_pnl": 0.0,
-            # Quote-currency NAV only — same narrowing as the rest of this
-            # adapter's docstring: a spot base-asset holding doesn't show up
-            # here, only the quote balance free or held by open orders.
-            "equity": available + held,
-            "equity_scope": f"{self._quote} balance only (excludes base asset held)",
-            "account_equity_total": None,
-        }
-        return self._cached
+            def _amount(obj) -> float:
+                if obj is None:
+                    return 0.0
+                val = getattr(obj, "value", None) if not isinstance(obj, dict) else obj.get("value")
+                try:
+                    return float(val or 0.0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            available = _amount(getattr(account, "available_balance", None))
+            held = _amount(getattr(account, "hold", None))
+
+            self._cached = {
+                "available": available,
+                # Spot has no position margin; what's held is held by resting
+                # orders, which is exactly what `frozen` means on the other
+                # venues.
+                "margin_used": 0.0,
+                "frozen": held,
+                "unrealised_pnl": 0.0,
+                # Quote-currency NAV only — same narrowing as the rest of this
+                # adapter's docstring: a spot base-asset holding doesn't show up
+                # here, only the quote balance free or held by open orders.
+                "equity": available + held,
+                "equity_scope": f"{self._quote} balance only (excludes base asset held)",
+                "account_equity_total": None,
+            }
+            return self._cached

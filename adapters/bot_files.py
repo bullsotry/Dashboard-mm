@@ -14,7 +14,9 @@ must degrade quietly, not crash a poll loop.
 
 from __future__ import annotations
 
+import functools
 import json
+import threading
 from collections import deque
 from pathlib import Path
 
@@ -37,6 +39,36 @@ def _opt_float(value) -> float | None:
         return None
 
 
+def _synchronized(method):
+    """Serialise one adapter instance's methods against each other.
+
+    /snapshot is a sync `def`, so FastAPI runs it in the anyio threadpool:
+    two tabs, or a forced poll landing on a pending one, put several threads
+    inside the *same* cached adapter at once, and the background loops add
+    another. Everything below tails file offsets and memoises a replay keyed
+    on them, none of which is atomic.
+
+    Measured before this existed (tests/test_concurrency.py): 8 threads
+    against a 3000-row ledger each re-read the whole file from offset 0,
+    leaving 20000 rows in a deque capped at 20000 and a realised PnL of
+    ~9798 where the true figure is 1470 — with two threads disagreeing on
+    which wrong number it was.
+
+    Reentrant because these methods call each other (get_stats -> _all_fills
+    -> _poll_fills). Every section it guards is local-file I/O measured in
+    microseconds, never a network call, so serialising is cheap — and it
+    collapses the duplicate work of two tabs asking for the same figure at
+    the same instant into one computation.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class BotStateAdapter:
     def __init__(
         self,
@@ -46,6 +78,8 @@ class BotStateAdapter:
         fills_paths: Path | list[Path] | tuple[Path, ...] | None,
         fills_maxlen: int = 2000,
     ):
+        # Guards every method below; see _synchronized above.
+        self._lock = threading.RLock()
         self.venue_name = venue_name
         self.symbol = symbol
         self._viz_path = viz_path
@@ -101,6 +135,7 @@ class BotStateAdapter:
         # markout rows (which carry no symbol) need joining by trade_id.
         self._venue_symbols: set[str] = set()
 
+    @_synchronized
     def _read_viz(self) -> dict | None:
         """The bot's state file, re-parsed only when it actually changed.
 
@@ -130,6 +165,7 @@ class BotStateAdapter:
         self._viz_cache = (ident, data)
         return data
 
+    @_synchronized
     def get_orderbook(self) -> OrderBook | None:
         data = self._read_viz()
         if not data:
@@ -146,6 +182,7 @@ class BotStateAdapter:
             "ts": float(ob.get("ts") or 0.0),
         }
 
+    @_synchronized
     def get_positions(self) -> list[Position]:
         # Sizes here are scaled by `_contract_value`, which is learnt from
         # the fill ledger — so tail it before reading, or the first panel
@@ -191,6 +228,7 @@ class BotStateAdapter:
                 )
         return positions
 
+    @_synchronized
     def get_quotes(self) -> list[Quote]:
         """The bot's own resting orders.
 
@@ -234,6 +272,7 @@ class BotStateAdapter:
             quotes.append({"side": side, "price": price, "size": size})
         return quotes
 
+    @_synchronized
     def get_source_ts(self) -> float | None:
         """How fresh the *bot's* state is, not how fresh our poll is. The
         orderbook timestamp is the bot's own heartbeat: it only advances
@@ -252,11 +291,13 @@ class BotStateAdapter:
         except OSError:
             return None
 
+    @_synchronized
     def get_account(self) -> Account | None:
         # Account/margin comes from a venue REST adapter, not from bot-
         # published files. server.py merges the two at the route level.
         return None
 
+    @_synchronized
     def _net_and_hedge(self) -> tuple[float | None, bool]:
         """The exchange's own position, read fresh from the viz file. This is
         what makes a fills replay checkable: if replaying the ledger lands
@@ -294,6 +335,7 @@ class BotStateAdapter:
         )
         return net, hedge
 
+    @_synchronized
     def get_sessions(self, observed_start_ts: float | None = None) -> list[Session]:
         """Every recorded session for this bot, plus the running one.
 
@@ -375,12 +417,14 @@ class BotStateAdapter:
             "joined_by": joined_by,
         }
 
+    @_synchronized
     def _venue_is_multi_symbol(self) -> bool:
         """Whether this bot's venue carries more than one symbol in the
         ledgers being tailed — i.e. whether markout rows for this venue could
         belong to a different bot."""
         return len(self._venue_symbols) > 1
 
+    @_synchronized
     def _poll_markouts(self) -> None:
         for path in self._fills_paths:
             mo_path = markouts_path_for(path)
@@ -423,6 +467,7 @@ class BotStateAdapter:
             if len(self._markouts) > self._fills_maxlen:
                 self._markouts = self._markouts[-self._fills_maxlen :]
 
+    @_synchronized
     def _opening_inventory_recorded(self, since_ts: float) -> float | None:
         """What the bot itself said it was holding when the session's first
         fill landed. None when the ledger doesn't record inventory, or when
@@ -434,6 +479,7 @@ class BotStateAdapter:
                 return f.get("inventory_before")
         return None
 
+    @_synchronized
     def get_stats(self, since_ts: float | None = None, until_ts: float | None = None) -> Stats:
         self._poll_fills()
         net, hedge = self._net_and_hedge()
@@ -485,6 +531,7 @@ class BotStateAdapter:
         self._curve_cache = (key, curve)
         return curve
 
+    @_synchronized
     def get_first_fill_ts(self) -> float | None:
         """When the bot's recorded activity starts, as far as this window
         knows. Used to decide how much chart history to pull: an operator
@@ -502,10 +549,12 @@ class BotStateAdapter:
         # every request for a value the sort had already determined.
         return fills[0]["ts"]
 
+    @_synchronized
     def get_recent_fills(self, limit: int = 500) -> list[Fill]:
         self._poll_fills()
         return self._all_fills()[-limit:]
 
+    @_synchronized
     def _all_fills(self) -> list[Fill]:
         """Every matching fill across every tailed ledger, merged into one
         chronological list. Each source file is individually append-only and
@@ -528,10 +577,12 @@ class BotStateAdapter:
         self._all_fills_cache = (self._fills_version, merged)
         return merged
 
+    @_synchronized
     def _poll_fills(self) -> None:
         for path in self._fills_paths:
             self._poll_one_fills_file(path)
 
+    @_synchronized
     def _poll_one_fills_file(self, path: Path) -> None:
         try:
             st = path.stat()

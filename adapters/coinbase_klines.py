@@ -24,6 +24,7 @@ import time
 
 import requests
 
+from ._locking import CacheGuard
 from .base import Candle
 
 _URL = "https://api.coinbase.com/api/v3/brokerage/market/products/{product}/candles"
@@ -90,6 +91,8 @@ class CoinbaseKlineAdapter:
     def __init__(self, symbol: str, poll_interval_s: float = 20.0):
         self._symbol = symbol
         self._poll_interval_s = poll_interval_s
+        # One in-flight fetch per adapter, and no lock held across it.
+        self._guard = CacheGuard()
         # interval -> {"bars": {time: Candle}, "last_poll_ts": float}
         self._cache: dict[str, dict] = {}
 
@@ -119,27 +122,69 @@ class CoinbaseKlineAdapter:
         if interval not in _GRANULARITY:
             interval = DEFAULT_INTERVAL
 
-        entry = self._cache.setdefault(interval, {"bars": {}, "last_poll_ts": 0.0})
-        bars: dict[int, Candle] = entry["bars"]
-        now = time.time()
+        with self._guard.data:
+            entry = self._cache.setdefault(interval, {"bars": {}, "last_poll_ts": 0.0})
+            bars: dict[int, Candle] = entry["bars"]
+            now = time.time()
 
-        step = interval_seconds(interval)
-        floor_ts = now - MAX_HISTORY_S
-        target = floor_ts if since_ts is None else max(float(since_ts), floor_ts)
-        # Always keep a page of context, so a bot that started ten minutes
-        # ago still gets a chart with something to read.
-        target = min(target, now - _PAGE_ROWS * step)
+            step = interval_seconds(interval)
+            floor_ts = now - MAX_HISTORY_S
+            target = floor_ts if since_ts is None else max(float(since_ts), floor_ts)
+            # Always keep a page of context, so a bot that started ten minutes
+            # ago still gets a chart with something to read.
+            target = min(target, now - _PAGE_ROWS * step)
 
-        # See bitunix_klines.get_klines for why this floor exists: a venue's
-        # history is finite, so a bot older than it can never reach `target`,
-        # and without remembering the floor `needs_history` stays true
-        # forever and defeats the poll-interval cache on every request.
-        history_floor = entry.get("history_floor")
-        at_floor = history_floor is not None and bars and min(bars) <= history_floor
-        needs_history = not bars or (
-            min(bars) > target + step and len(bars) < MAX_CANDLES and not at_floor
-        )
-        if now - entry["last_poll_ts"] < self._poll_interval_s and not needs_history:
+            # See bitunix_klines.get_klines for why this floor exists: a venue's
+            # history is finite, so a bot older than it can never reach `target`,
+            # and without remembering the floor `needs_history` stays true
+            # forever and defeats the poll-interval cache on every request.
+            history_floor = entry.get("history_floor")
+            at_floor = history_floor is not None and bars and min(bars) <= history_floor
+            needs_history = not bars or (
+                min(bars) > target + step and len(bars) < MAX_CANDLES and not at_floor
+            )
+            if now - entry["last_poll_ts"] < self._poll_interval_s and not needs_history:
+                return self._materialise(entry)
+            entry["last_poll_ts"] = now
+
+        # Everything below fetches. The data lock is taken only to merge a
+        # page that has already arrived — never held across a request, or a
+        # concurrent reader would wait out the whole backfill (up to 8 pages
+        # at a 5s timeout) for candles it already has. See adapters/_locking.
+        with self._guard.try_fetch() as fetching:
+            if not fetching:
+                # Another thread is already refreshing this interval. Serve
+                # what we hold instead of firing a duplicate set of REST
+                # calls at the venue.
+                with self._guard.data:
+                    return self._materialise(entry)
+
+            # The recent page carries the in-progress candle: refresh it first so
+            # the chart's right edge is live even when history is still filling.
+            page = self._fetch_page(interval, int(now) + step)
+            with self._guard.data:
+                for c in page:
+                    bars[c["time"]] = c
+
+            pages = 0
+            # `not at_floor` here too — see bitunix_klines for why the loop
+            # must respect the floor, not just the cache check above.
+            while pages < MAX_PAGES_PER_CALL and not at_floor:
+                with self._guard.data:
+                    if not bars or len(bars) >= MAX_CANDLES or min(bars) <= target + step:
+                        break
+                    oldest = min(bars)
+                page = [c for c in self._fetch_page(interval, oldest) if c["time"] < oldest]
+                with self._guard.data:
+                    if not page:
+                        # Venue has no more history below this point.
+                        entry["history_floor"] = min(bars)
+                        break
+                    for c in page:
+                        bars[c["time"]] = c
+                pages += 1
+
+        with self._guard.data:
             return self._materialise(entry)
         entry["last_poll_ts"] = now
 
