@@ -1,0 +1,15 @@
+[Unit]
+Description=dashboard-mm health probe (does /snapshot still answer?)
+After=dashboard-mm.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/root/dashboard-mm/.env
+ExecStart=/root/dashboard-mm/deploy/healthcheck.sh
+# Read-only: this probe curls a loopback port and parses the answer. It has
+# no reason to touch the filesystem, and the dashboard it watches is itself
+# a read-only observer — keep the same guarantee one level up.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes

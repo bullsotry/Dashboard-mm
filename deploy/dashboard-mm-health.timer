@@ -1,0 +1,12 @@
+[Unit]
+Description=Probe dashboard-mm every 2 minutes
+
+[Timer]
+# 2min, not 30s: this catches "up but broken", a state that lasts until
+# someone acts on it. Probing harder would only add journal noise.
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
